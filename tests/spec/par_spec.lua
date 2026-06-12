@@ -1,4 +1,5 @@
 local test_support = require("test_support")
+local http = require("socket.http")
 require 'busted.runner'()
 
 local function par_opts(extra)
@@ -22,15 +23,21 @@ local function assert_par_endpoint_call_contains(s, case_insensitive)
 end
 
 describe("when PAR is enabled", function()
-  test_support.start_server({
-    oidc_opts = par_opts()
-  })
-  teardown(test_support.stop_server)
+  local status, headers
 
-  local _, status, headers = http.request({
-    url = "http://127.0.0.1/default/t",
-    redirect = false
-  })
+  setup(function()
+    test_support.start_server({
+      oidc_opts = par_opts()
+    })
+
+    local _
+    _, status, headers = http.request({
+      url = "http://127.0.0.1/default/t",
+      redirect = false
+    })
+  end)
+
+  teardown(test_support.stop_server)
 
   it("posts the authorization request parameters to the PAR endpoint", function()
     assert_par_endpoint_call_contains("response_type=code")
@@ -66,20 +73,23 @@ describe("when PAR is enabled", function()
 end)
 
 describe("when PAR is enabled using client_secret_basic", function()
-  test_support.start_server({
-    oidc_opts = par_opts({
-      discovery = {
-        pushed_authorization_request_endpoint = "http://127.0.0.1/par",
-        token_endpoint_auth_methods_supported = { "client_secret_basic" },
-      }
+  setup(function()
+    test_support.start_server({
+      oidc_opts = par_opts({
+        discovery = {
+          pushed_authorization_request_endpoint = "http://127.0.0.1/par",
+          token_endpoint_auth_methods_supported = { "client_secret_basic" },
+        }
+      })
     })
-  })
-  teardown(test_support.stop_server)
 
-  http.request({
-    url = "http://127.0.0.1/default/t",
-    redirect = false
-  })
+    http.request({
+      url = "http://127.0.0.1/default/t",
+      redirect = false
+    })
+  end)
+
+  teardown(test_support.stop_server)
 
   it("uses a basic auth header for the PAR endpoint", function()
     assert.error_log_contains("par authorization header: Basic")
@@ -92,22 +102,25 @@ describe("when PAR is enabled using client_secret_basic", function()
 end)
 
 describe("when PAR is enabled using private_key_jwt", function()
-  test_support.start_server({
-    oidc_opts = par_opts({
-      discovery = {
-        pushed_authorization_request_endpoint = "http://127.0.0.1/par",
-        token_endpoint_auth_methods_supported = { "private_key_jwt" },
-      },
-      token_endpoint_auth_method = "private_key_jwt",
-      client_rsa_private_key = test_support.load("/spec/private_rsa_key.pem"),
+  setup(function()
+    test_support.start_server({
+      oidc_opts = par_opts({
+        discovery = {
+          pushed_authorization_request_endpoint = "http://127.0.0.1/par",
+          token_endpoint_auth_methods_supported = { "private_key_jwt" },
+        },
+        token_endpoint_auth_method = "private_key_jwt",
+        client_rsa_private_key = test_support.load("/spec/private_rsa_key.pem"),
+      })
     })
-  })
-  teardown(test_support.stop_server)
 
-  http.request({
-    url = "http://127.0.0.1/default/t",
-    redirect = false
-  })
+    http.request({
+      url = "http://127.0.0.1/default/t",
+      redirect = false
+    })
+  end)
+
+  teardown(test_support.stop_server)
 
   it("sends a private_key_jwt client assertion to the PAR endpoint", function()
     assert_par_endpoint_call_contains("client_assertion=ey")
@@ -117,17 +130,23 @@ describe("when PAR is enabled using private_key_jwt", function()
 end)
 
 describe("when PAR is enabled with an unsupported client authentication method", function()
-  test_support.start_server({
-    oidc_opts = par_opts({
-      pushed_authorization_request_endpoint_auth_method = "unsupported_auth",
-    })
-  })
-  teardown(test_support.stop_server)
+  local status
 
-  local _, status = http.request({
-    url = "http://127.0.0.1/default/t",
-    redirect = false
-  })
+  setup(function()
+    test_support.start_server({
+      oidc_opts = par_opts({
+        pushed_authorization_request_endpoint_auth_method = "unsupported_auth",
+      })
+    })
+
+    local _
+    _, status = http.request({
+      url = "http://127.0.0.1/default/t",
+      redirect = false
+    })
+  end)
+
+  teardown(test_support.stop_server)
 
   it("fails authentication", function()
     assert.are.equals(401, status)
@@ -140,17 +159,23 @@ describe("when PAR is enabled with an unsupported client authentication method",
 end)
 
 describe("when PAR is enabled but no endpoint is configured", function()
-  test_support.start_server({
-    oidc_opts = {
-      use_par = true,
-    }
-  })
-  teardown(test_support.stop_server)
+  local status
 
-  local _, status = http.request({
-    url = "http://127.0.0.1/default/t",
-    redirect = false
-  })
+  setup(function()
+    test_support.start_server({
+      oidc_opts = {
+        use_par = true,
+      }
+    })
+
+    local _
+    _, status = http.request({
+      url = "http://127.0.0.1/default/t",
+      redirect = false
+    })
+  end)
+
+  teardown(test_support.stop_server)
 
   it("fails authentication", function()
     assert.are.equals(401, status)
@@ -163,19 +188,25 @@ describe("when PAR is enabled but no endpoint is configured", function()
 end)
 
 describe("when the PAR endpoint sends a 4xx status", function()
-  test_support.start_server({
-    oidc_opts = par_opts({
-      discovery = {
-        pushed_authorization_request_endpoint = "http://127.0.0.1/not-there",
-      }
-    })
-  })
-  teardown(test_support.stop_server)
+  local status
 
-  local _, status = http.request({
-    url = "http://127.0.0.1/default/t",
-    redirect = false
-  })
+  setup(function()
+    test_support.start_server({
+      oidc_opts = par_opts({
+        discovery = {
+          pushed_authorization_request_endpoint = "http://127.0.0.1/not-there",
+        }
+      })
+    })
+
+    local _
+    _, status = http.request({
+      url = "http://127.0.0.1/default/t",
+      redirect = false
+    })
+  end)
+
+  teardown(test_support.stop_server)
 
   it("fails authentication", function()
     assert.are.equals(401, status)
@@ -188,19 +219,25 @@ describe("when the PAR endpoint sends a 4xx status", function()
 end)
 
 describe("when the PAR endpoint does not return JSON", function()
-  test_support.start_server({
-    oidc_opts = par_opts({
-      discovery = {
-        pushed_authorization_request_endpoint = "http://127.0.0.1/par-invalid-json",
-      }
-    })
-  })
-  teardown(test_support.stop_server)
+  local status
 
-  local _, status = http.request({
-    url = "http://127.0.0.1/default/t",
-    redirect = false
-  })
+  setup(function()
+    test_support.start_server({
+      oidc_opts = par_opts({
+        discovery = {
+          pushed_authorization_request_endpoint = "http://127.0.0.1/par-invalid-json",
+        }
+      })
+    })
+
+    local _
+    _, status = http.request({
+      url = "http://127.0.0.1/default/t",
+      redirect = false
+    })
+  end)
+
+  teardown(test_support.stop_server)
 
   it("fails authentication", function()
     assert.are.equals(401, status)
@@ -212,19 +249,25 @@ describe("when the PAR endpoint does not return JSON", function()
 end)
 
 describe("when the PAR endpoint response omits request_uri", function()
-  test_support.start_server({
-    oidc_opts = par_opts({
-      discovery = {
-        pushed_authorization_request_endpoint = "http://127.0.0.1/par-no-request-uri",
-      }
-    })
-  })
-  teardown(test_support.stop_server)
+  local status
 
-  local _, status = http.request({
-    url = "http://127.0.0.1/default/t",
-    redirect = false
-  })
+  setup(function()
+    test_support.start_server({
+      oidc_opts = par_opts({
+        discovery = {
+          pushed_authorization_request_endpoint = "http://127.0.0.1/par-no-request-uri",
+        }
+      })
+    })
+
+    local _
+    _, status = http.request({
+      url = "http://127.0.0.1/default/t",
+      redirect = false
+    })
+  end)
+
+  teardown(test_support.stop_server)
 
   it("fails authentication", function()
     assert.are.equals(401, status)
