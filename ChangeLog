@@ -1,4 +1,5 @@
 unreleased
+- added a security policy for privately reporting vulnerabilities.
 - added maintenance automation for dependency updates and pull request
   contribution checks.
 - hardened the test Docker image by minimizing apt-installed packages
