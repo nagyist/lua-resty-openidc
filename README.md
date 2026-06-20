@@ -130,6 +130,14 @@ h2JHukolz9xf6qN61QMLSd83+kwoBr2drp6xg3eGDLIkQCQLrkY=
 
              --response_mode=form_post can be used to make lua-resty-openidc use the [OAuth 2.0 Form Post Response Mode](https://openid.net/specs/oauth-v2-form-post-response-mode-1_0.html). *Note* for modern browsers you will need to set [`$session_cookie_samesite`](https://github.com/bungle/lua-resty-session#string-sessioncookiesamesite) to `None` with form_post unless your OpenID Connect Provider and Relying Party share the same domain.
              --authorization_params = { hd="zmartzone.eu" },
+             -- When use_par is set to true, lua-resty-openidc will use OAuth 2.0 Pushed Authorization Requests (PAR, RFC 9126).
+             -- The authorization request parameters are posted to the pushed_authorization_request_endpoint from discovery,
+             -- and the browser is redirected to the authorization endpoint with the returned request_uri.
+             --use_par = false,
+             -- Override the PAR endpoint from discovery when needed.
+             --pushed_authorization_request_endpoint = "https://MY_OP/pushed_authorization_request",
+             -- Override the client authentication method for the PAR endpoint. Defaults to token_endpoint_auth_method.
+             --pushed_authorization_request_endpoint_auth_method = "client_secret_basic",
              --scope = "openid email profile",
              -- Refresh the users id_token after 900 seconds without requiring re-authentication
              --refresh_session_interval = 900,

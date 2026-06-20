@@ -77,6 +77,11 @@ local supported_token_auth_methods = {
   client_secret_jwt = token_auth_method_precondition('client_secret_jwt', 'client_secret')
 }
 
+local function can_use_token_auth_method(method, opts)
+  local supported = supported_token_auth_methods[method]
+  return supported and (type(supported) ~= 'function' or supported(opts))
+end
+
 local openidc = {
   _VERSION = "1.8.0"
 }
@@ -310,12 +315,56 @@ local function decorate_request(http_request_decorator, req)
   return http_request_decorator and http_request_decorator(req) or req
 end
 
+local function openidc_is_expected_response_status(response_status, expected_status)
+  if type(expected_status) == "table" then
+    for _, status in ipairs(expected_status) do
+      if response_status == status then
+        return true
+      end
+    end
+    return false
+  end
+
+  return response_status == expected_status
+end
+
 local sha256 = (require 'resty.sha256'):new()
 local function openidc_s256(verifier)
   sha256:update(verifier)
   local s256 = b64url(sha256:final())
   sha256:reset()
   return s256
+end
+
+local function openidc_pushed_authorization_request(opts, params)
+  local endpoint = opts.pushed_authorization_request_endpoint
+      or opts.discovery.pushed_authorization_request_endpoint
+  if not endpoint then
+    return nil, "no pushed authorization request endpoint URI"
+  end
+
+  local auth = opts.pushed_authorization_request_endpoint_auth_method
+  local auth_option = "pushed_authorization_request_endpoint_auth_method"
+  if not auth then
+    auth = opts.token_endpoint_auth_method
+    auth_option = "token_endpoint_auth_method"
+  end
+  if auth and not can_use_token_auth_method(auth, opts) then
+    return nil, "configured value for " .. auth_option .. " ("
+        .. auth .. ") is not supported"
+  end
+
+  local json, err = openidc.call_token_endpoint(opts, endpoint, params, auth,
+      "pushed authorization request", false, { 200, 201 })
+  if err then
+    return nil, err
+  end
+
+  if not json.request_uri then
+    return nil, "pushed authorization request response did not contain a request_uri"
+  end
+
+  return json
 end
 
 -- send the browser of to the OP's authorization endpoint
@@ -386,20 +435,35 @@ local function openidc_authorize(opts, session, target_url, prompt)
     log(WARN, "unable to save session: " .. err)
   end
 
+  if opts.use_par then
+    local par_response
+    par_response, err = openidc_pushed_authorization_request(opts, params)
+    if err then
+      log(ERROR, "pushed authorization request failed: " .. err)
+      return err
+    end
+
+    params = {
+      client_id = opts.client_id,
+      request_uri = par_response.request_uri
+    }
+  end
+
   -- redirect to the /authorization endpoint
   ngx.header["Cache-Control"] = "no-cache, no-store, max-age=0"
   return ngx.redirect(openidc_combine_uri(opts.discovery.authorization_endpoint, params))
 end
 
 -- parse the JSON result from a call to the OP
-local function openidc_parse_json_response(response, ignore_body_on_success)
+local function openidc_parse_json_response(response, ignore_body_on_success, expected_status)
   local ignore_body_on_success = ignore_body_on_success or false
+  local expected_status = expected_status or 200
 
   local err
   local res
 
   -- check the response from the OP
-  if response.status ~= 200 then
+  if not openidc_is_expected_response_status(response.status, expected_status) then
     err = "response indicates failure, status=" .. response.status .. ", body=" .. response.body
   else
     if ignore_body_on_success then
@@ -438,7 +502,7 @@ local function openidc_configure_proxy(httpc, proxy_opts)
 end
 
 -- make a call to the token endpoint
-function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, ignore_body_on_success)
+function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, ignore_body_on_success, expected_status)
   local ignore_body_on_success = ignore_body_on_success or false
 
   local ep_name = endpoint_name or 'token'
@@ -534,7 +598,7 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
 
   log(DEBUG, ep_name .. " endpoint response: ", res.body)
 
-  return openidc_parse_json_response(res, ignore_body_on_success)
+  return openidc_parse_json_response(res, ignore_body_on_success, expected_status)
 end
 
 -- computes access_token expires_in value (in seconds)
@@ -655,11 +719,6 @@ function openidc.call_userinfo_endpoint(opts, access_token)
 
   -- parse the response from the user info endpoint
   return openidc_parse_json_response(res)
-end
-
-local function can_use_token_auth_method(method, opts)
-  local supported = supported_token_auth_methods[method]
-  return supported and (type(supported) ~= 'function' or supported(opts))
 end
 
 -- get the token endpoint authentication method
@@ -1614,7 +1673,10 @@ function openidc.authenticate(opts, target_url, unauth_action, session_or_opts)
     end
 
     log(DEBUG, "Authentication is required - Redirecting to OP Authorization endpoint")
-    openidc_authorize(opts, session, target_url, opts.prompt)
+    err = openidc_authorize(opts, session, target_url, opts.prompt)
+    if err then
+      return nil, err, session:get("original_url"), session
+    end
     return nil, nil, target_url, session
   end
 
@@ -1628,7 +1690,10 @@ function openidc.authenticate(opts, target_url, unauth_action, session_or_opts)
       end
 
       log(DEBUG, "Silent authentication is required - Redirecting to OP Authorization endpoint")
-      openidc_authorize(opts, session, target_url, "none")
+      err = openidc_authorize(opts, session, target_url, "none")
+      if err then
+        return nil, err, session:get("original_url"), session
+      end
       return nil, nil, target_url, session
     end
   end
