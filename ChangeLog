@@ -1,8 +1,12 @@
 unreleased
+- hardened the test Docker image by minimizing apt-installed packages
+  and running the test suite as a non-root user.
 - added support for OAuth 2.0 Pushed Authorization Requests (PAR,
   RFC 9126) through the opt-in use_par option.
 - propagate errors returned by the `lifecycle.on_created` hook during
   authorization redirects.
+- add redirect_after_logout_with_client_id option to send client_id on
+  logout when id_token_hint is not available; see #518
 - added support for OAuth 2.0 DPoP client proof generation (RFC 9449)
   through the opt-in use_dpop option.
 - added ES256, RS256, and PS256 signing support for DPoP proofs.
