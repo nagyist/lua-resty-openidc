@@ -525,12 +525,8 @@ local function openidc_is_expected_response_status(response_status, expected_sta
   return response_status == expected_status
 end
 
-local sha256 = (require 'resty.sha256'):new()
 local function openidc_s256(verifier)
-  sha256:update(verifier)
-  local s256 = b64url(sha256:final())
-  sha256:reset()
-  return s256
+  return b64url(openidc_sha256(verifier))
 end
 
 local function openidc_pushed_authorization_request(opts, params)
