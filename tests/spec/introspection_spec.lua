@@ -4,7 +4,12 @@ require 'busted.runner'()
 
 local function assert_introspection_endpoint_call_contains(s, case_insensitive)
    assert.error_log_contains("Received introspection request: .*" ..  s .. ".*",
-                             case_insensitive)
+                              case_insensitive)
+end
+
+local function assert_introspection_endpoint_call_doesnt_contain(s, case_insensitive)
+   assert.is_not.error_log_contains("Received introspection request: .*" ..  s .. ".*",
+                              case_insensitive)
 end
 
 describe("when the introspection endpoint is invoked", function()
@@ -42,6 +47,35 @@ describe("when the introspection endpoint is invoked", function()
     it("the response is valid", function()
       assert.are.equals(200, status)
     end)
+  end)
+end)
+
+describe("when the introspection endpoint is invoked using client_secret_basic", function()
+  test_support.start_server({
+    introspection_opts = {
+      introspection_endpoint_auth_method = "client_secret_basic"
+    }
+  })
+  teardown(test_support.stop_server)
+  local jwt = test_support.trim(http.request("http://127.0.0.1/jwt"))
+  local _, status = http.request({
+    url = "http://127.0.0.1/introspect",
+    headers = { authorization = "Bearer " .. jwt }
+  })
+  it("the request doesn't contain the client_id parameter", function()
+    assert_introspection_endpoint_call_doesnt_contain("client_id=client_id")
+  end)
+  it("the request doesn't contain the client_secret parameter", function()
+    assert_introspection_endpoint_call_doesnt_contain("client_secret=client_secret")
+  end)
+  it("the request contains the token parameter", function()
+    assert_introspection_endpoint_call_contains("token=" .. jwt:gsub("%-", "%%%-"))
+  end)
+  it("the request contains a basic auth header", function()
+    assert.error_log_contains("introspection authorization header: Basic")
+  end)
+  it("the response is valid", function()
+    assert.are.equals(200, status)
   end)
 end)
 

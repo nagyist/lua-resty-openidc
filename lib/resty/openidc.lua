@@ -1867,11 +1867,13 @@ function openidc.introspect(opts)
 
   body[token_param_name] = access_token
 
-  if opts.client_id then
-    body.client_id = opts.client_id
-  end
-  if opts.client_secret then
-    body.client_secret = opts.client_secret
+  if opts.introspection_endpoint_auth_method == nil then
+    if opts.client_id then
+      body.client_id = opts.client_id
+    end
+    if opts.client_secret then
+      body.client_secret = opts.client_secret
+    end
   end
 
   -- merge any provided extra parameters
