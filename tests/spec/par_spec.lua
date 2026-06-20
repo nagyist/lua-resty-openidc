@@ -101,6 +101,34 @@ describe("when PAR is enabled using client_secret_basic", function()
   end)
 end)
 
+describe("when the PAR endpoint returns HTTP 200", function()
+  local status, headers
+
+  setup(function()
+    test_support.start_server({
+      oidc_opts = par_opts({
+        discovery = {
+          pushed_authorization_request_endpoint = "http://127.0.0.1/par-200",
+        }
+      })
+    })
+
+    local _
+    _, status, headers = http.request({
+      url = "http://127.0.0.1/default/t",
+      redirect = false
+    })
+  end)
+
+  teardown(test_support.stop_server)
+
+  it("accepts the response for interoperability", function()
+    assert.are.equals(302, status)
+    assert.truthy(string.find(headers["location"], "request_uri=", 1, true))
+    assert.truthy(string.find(headers["location"], "test-200", 1, true))
+  end)
+end)
+
 describe("when PAR is enabled using private_key_jwt", function()
   setup(function()
     test_support.start_server({
