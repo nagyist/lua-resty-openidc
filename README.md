@@ -148,6 +148,9 @@ h2JHukolz9xf6qN61QMLSd83+kwoBr2drp6xg3eGDLIkQCQLrkY=
              -- proof JWTs to the token endpoint and will use DPoP-bound access tokens for userinfo.
              -- The initial DPoP implementation supports ES256, RS256, and PS256 proofs and retries token/userinfo calls
              -- once when the OP returns a DPoP-Nonce challenge.
+             -- Authorization requests include dpop_jkt to bind the authorization code to the configured DPoP public key.
+             -- Token responses are expected to return token_type=DPoP.
+             -- If the OP provides DPoP-Nonce on a successful token response, it is reused for subsequent token requests.
              --use_dpop = false,
              --dpop_signing_alg = "ES256",
              --dpop_private_key = "PEM-encoded private key matching dpop_signing_alg",

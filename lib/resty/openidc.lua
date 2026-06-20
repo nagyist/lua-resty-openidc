@@ -120,6 +120,73 @@ local function openidc_sha256(value)
   return digest:final()
 end
 
+local function openidc_dpop_public_jwk_private_field(jwk)
+  for _, field in ipairs({ "d", "p", "q", "dp", "dq", "qi", "oth", "k" }) do
+    if jwk[field] ~= nil then
+      return field
+    end
+  end
+  return nil
+end
+
+local function openidc_validate_dpop_public_jwk(jwk)
+  if jwk == nil then
+    return "Can't use DPoP without opts.dpop_public_jwk"
+  end
+
+  if type(jwk) ~= "table" then
+    return "opts.dpop_public_jwk must be a table"
+  end
+
+  local private_field = openidc_dpop_public_jwk_private_field(jwk)
+  if private_field then
+    return "opts.dpop_public_jwk must not contain private key field '" .. private_field .. "'"
+  end
+
+  return nil
+end
+
+local function openidc_json_member(name, value)
+  return cjson.encode(name) .. ":" .. cjson.encode(value)
+end
+
+local function openidc_dpop_jwk_thumbprint(jwk)
+  local err = openidc_validate_dpop_public_jwk(jwk)
+  if err then
+    return nil, err
+  end
+
+  local json
+  if jwk.kty == "EC" then
+    if not (jwk.crv and jwk.x and jwk.y) then
+      return nil, "opts.dpop_public_jwk with kty 'EC' must contain crv, x, and y"
+    end
+    json = "{" .. table.concat({
+      openidc_json_member("crv", jwk.crv),
+      openidc_json_member("kty", jwk.kty),
+      openidc_json_member("x", jwk.x),
+      openidc_json_member("y", jwk.y),
+    }, ",") .. "}"
+  elseif jwk.kty == "RSA" then
+    if not (jwk.e and jwk.n) then
+      return nil, "opts.dpop_public_jwk with kty 'RSA' must contain e and n"
+    end
+    json = "{" .. table.concat({
+      openidc_json_member("e", jwk.e),
+      openidc_json_member("kty", jwk.kty),
+      openidc_json_member("n", jwk.n),
+    }, ",") .. "}"
+  else
+    return nil, "opts.dpop_public_jwk kty '" .. tostring(jwk.kty) .. "' is not supported"
+  end
+
+  return b64url(openidc_sha256(json))
+end
+
+local function openidc_dpop_htu(uri)
+  return uri and uri:gsub("[#?].*$", "")
+end
+
 local function openidc_dpop_signing_params(pkey, alg)
   if alg == "ES256" then
     return nil, { ecdsa_use_raw = true }
@@ -167,6 +234,10 @@ local function openidc_dpop_proof(opts, htm, htu, access_token, nonce)
   if not opts.dpop_public_jwk then
     return nil, "Can't use DPoP without opts.dpop_public_jwk"
   end
+  local public_jwk_err = openidc_validate_dpop_public_jwk(opts.dpop_public_jwk)
+  if public_jwk_err then
+    return nil, public_jwk_err
+  end
 
   local alg = opts.dpop_signing_alg or "ES256"
   if not supported_dpop_signing_algs[alg] then
@@ -179,7 +250,7 @@ local function openidc_dpop_proof(opts, htm, htu, access_token, nonce)
   local payload = {
     jti = openidc_dpop_jti(),
     htm = htm,
-    htu = htu,
+    htu = openidc_dpop_htu(htu),
     iat = ngx.time(),
   }
 
@@ -334,7 +405,18 @@ end
 
 local function get_first_header(headers, header_name)
   local header = headers[header_name]
-  return get_first(header)
+  if header then
+    return get_first(header)
+  end
+
+  local lower_header_name = string.lower(header_name)
+  for name, value in pairs(headers) do
+    if string.lower(name) == lower_header_name then
+      return get_first(value)
+    end
+  end
+
+  return nil
 end
 
 local function get_first_header_and_strip_whitespace(headers, header_name)
@@ -529,6 +611,15 @@ local function openidc_authorize(opts, session, target_url, prompt)
     for k, v in pairs(opts.authorization_params) do params[k] = v end
   end
 
+  if opts.use_dpop then
+    local dpop_jkt
+    dpop_jkt, err = openidc_dpop_jwk_thumbprint(opts.dpop_public_jwk)
+    if err then
+      return err
+    end
+    params.dpop_jkt = dpop_jkt
+  end
+
   -- store state in the session
   session:set("original_url", target_url)
   session:set("state", state)
@@ -624,6 +715,16 @@ local function openidc_dpop_nonce_from_response(res, accepted_statuses)
     if res.status == status then
       return get_first_header(res.headers, "DPoP-Nonce") or get_first_header(res.headers, "dpop-nonce")
     end
+  end
+  return nil
+end
+
+local function openidc_validate_dpop_token_response(json)
+  if not json or not json.access_token then
+    return nil
+  end
+  if type(json.token_type) ~= "string" or string.lower(json.token_type) ~= "dpop" then
+    return "token endpoint returned an access token without token_type DPoP"
   end
   return nil
 end
@@ -725,7 +826,8 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
     end
     if ep_name == "token" and opts.use_dpop then
       local proof
-      proof, err = openidc_dpop_proof(opts, "POST", endpoint, nil, dpop_nonce)
+      proof, err = openidc_dpop_proof(opts, "POST", endpoint, nil,
+          dpop_nonce or opts.dpop_token_nonce or opts.dpop_nonce)
       if err then
         return nil, err, true
       end
@@ -759,6 +861,7 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
 
   local dpop_nonce = ep_name == "token" and opts.use_dpop and openidc_dpop_nonce_from_response(res, { 400, 401 })
   if dpop_nonce then
+    opts.dpop_token_nonce = dpop_nonce
     log(DEBUG, "retrying " .. ep_name .. " endpoint call with DPoP nonce")
     res, err, proof_err = request_token_endpoint(dpop_nonce)
     if proof_err then
@@ -771,9 +874,29 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
     end
   end
 
+  local next_dpop_nonce = ep_name == "token" and opts.use_dpop and openidc_dpop_nonce_from_response(res, { 200 })
+  if next_dpop_nonce then
+    opts.dpop_token_nonce = next_dpop_nonce
+  end
+  local response_dpop_nonce = next_dpop_nonce or dpop_nonce
+
   log(DEBUG, ep_name .. " endpoint response: ", res.body)
 
-  return openidc_parse_json_response(res, ignore_body_on_success, expected_status)
+  local json
+  json, err = openidc_parse_json_response(res, ignore_body_on_success, expected_status)
+  if err then
+    return nil, err
+  end
+  if ep_name == "token" and opts.use_dpop then
+    err = openidc_validate_dpop_token_response(json)
+    if err then
+      return nil, err
+    end
+    if response_dpop_nonce then
+      json._dpop_nonce = response_dpop_nonce
+    end
+  end
+  return json, nil
 end
 
 -- computes access_token expires_in value (in seconds)
@@ -866,7 +989,8 @@ function openidc.call_userinfo_endpoint(opts, access_token)
       }
     end
 
-    local proof, proof_err = openidc_dpop_proof(opts, "GET", opts.discovery.userinfo_endpoint, access_token, dpop_nonce)
+    local proof, proof_err = openidc_dpop_proof(opts, "GET", opts.discovery.userinfo_endpoint, access_token,
+        dpop_nonce or opts.dpop_userinfo_nonce or opts.dpop_nonce)
     if proof_err then
       return nil, proof_err
     end
@@ -905,6 +1029,7 @@ function openidc.call_userinfo_endpoint(opts, access_token)
 
   local dpop_nonce = opts.use_dpop and openidc_dpop_nonce_from_response(res, { 401 })
   if dpop_nonce then
+    opts.dpop_userinfo_nonce = dpop_nonce
     log(DEBUG, "retrying userinfo endpoint call with DPoP nonce")
     headers, headers_err = userinfo_headers(dpop_nonce)
     if headers_err then
@@ -1455,6 +1580,10 @@ local function openidc_authorization_response(opts, session)
     session:set("id_token", id_token)
   end
 
+  if opts.use_dpop and json._dpop_nonce then
+    session:set("dpop_token_nonce", json._dpop_nonce)
+  end
+
   if store_in_session(opts, 'user') then
     -- call the user info endpoint
     -- TODO: should this error be checked?
@@ -1718,6 +1847,9 @@ local function openidc_access_token(opts, session, try_to_renew)
     refresh_token = refresh_token,
     scope = opts.scope and opts.scope or "openid email profile"
   }
+  if opts.use_dpop then
+    opts.dpop_token_nonce = session:get("dpop_token_nonce") or opts.dpop_token_nonce
+  end
 
   local json
   json, err = openidc.call_token_endpoint(opts, opts.discovery.token_endpoint, body, opts.token_endpoint_auth_method)
@@ -1736,6 +1868,9 @@ local function openidc_access_token(opts, session, try_to_renew)
 
   session:set("access_token", json.access_token)
   session:set("access_token_expiration", current_time + openidc_access_token_expires_in(opts, json.expires_in))
+  if opts.use_dpop and json._dpop_nonce then
+    session:set("dpop_token_nonce", json._dpop_nonce)
+  end
   if json.refresh_token then
     session:set("refresh_token", json.refresh_token)
   end

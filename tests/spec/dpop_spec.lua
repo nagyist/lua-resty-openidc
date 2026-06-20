@@ -103,8 +103,36 @@ local function logged_dpop_headers(prefix)
   return headers
 end
 
+local function logged_par_request_body()
+  local log = test_support.load("/tmp/server/logs/error.log")
+  return log:match("Received par request: ([^\n]+)")
+end
+
 local function expected_ath(access_token)
   return b64url(sha2.bytes(access_token))
+end
+
+local function json_member(name, value)
+  return json.encode(name) .. ":" .. json.encode(value)
+end
+
+local function expected_jwk_thumbprint(jwk)
+  local canonical
+  if jwk.kty == "EC" then
+    canonical = "{" .. table.concat({
+      json_member("crv", jwk.crv),
+      json_member("kty", jwk.kty),
+      json_member("x", jwk.x),
+      json_member("y", jwk.y),
+    }, ",") .. "}"
+  elseif jwk.kty == "RSA" then
+    canonical = "{" .. table.concat({
+      json_member("e", jwk.e),
+      json_member("kty", jwk.kty),
+      json_member("n", jwk.n),
+    }, ",") .. "}"
+  end
+  return b64url(sha2.bytes(canonical))
 end
 
 local function verify_dpop_signature(jwt, public_key, alg)
@@ -164,6 +192,54 @@ describe("when DPoP is enabled", function()
     assert.are.equals("GET", userinfo_payload.htm)
     assert.are.equals("http://127.0.0.1/user-info", userinfo_payload.htu)
     assert.are.equals(expected_ath("a_token"), userinfo_payload.ath)
+  end)
+end)
+
+describe("when DPoP is enabled with PAR", function()
+  local dpop_public_jwk
+
+  setup(function()
+    local dpop_opts = generate_dpop_opts()
+    dpop_public_jwk = dpop_opts.dpop_public_jwk
+    dpop_opts.use_par = true
+    dpop_opts.discovery.pushed_authorization_request_endpoint = "http://127.0.0.1/par"
+    test_support.start_server({
+      oidc_opts = dpop_opts,
+    })
+
+    http.request({
+      url = "http://127.0.0.1/default/t",
+      redirect = false
+    })
+  end)
+
+  teardown(test_support.stop_server)
+
+  it("adds dpop_jkt to the pushed authorization request", function()
+    local body = logged_par_request_body()
+    assert.truthy(body)
+    assert.truthy(body:find("dpop_jkt=" .. expected_jwk_thumbprint(dpop_public_jwk), 1, true))
+  end)
+end)
+
+describe("when a DPoP endpoint URL contains a query string", function()
+  local userinfo_payload
+
+  setup(function()
+    local dpop_opts = generate_dpop_opts()
+    dpop_opts.discovery.userinfo_endpoint = "http://127.0.0.1/user-info?foo=bar"
+    test_support.start_server({
+      oidc_opts = dpop_opts,
+    })
+    test_support.login()
+
+    _, userinfo_payload = decode_jwt(logged_dpop_header("userinfo"))
+  end)
+
+  teardown(test_support.stop_server)
+
+  it("omits query and fragment components from the htu claim", function()
+    assert.are.equals("http://127.0.0.1/user-info", userinfo_payload.htu)
   end)
 end)
 
@@ -238,6 +314,36 @@ describe("when the token endpoint requests a DPoP nonce", function()
   end)
 end)
 
+describe("when the authorization server provides the next DPoP nonce on success", function()
+  local token_headers, refresh_payload
+
+  setup(function()
+    test_support.start_server({
+      token_response_expires_in = 0,
+      token_dpop_nonce_success = "next-token-nonce",
+      oidc_opts = generate_dpop_opts(),
+    })
+
+    local _, _, cookies = test_support.login()
+    os.execute("sleep 1.5")
+    http.request({
+      url = "http://localhost/default/t",
+      redirect = false,
+      headers = { cookie = cookies },
+    })
+
+    token_headers = logged_dpop_headers("token")
+    _, refresh_payload = decode_jwt(token_headers[2])
+  end)
+
+  teardown(test_support.stop_server)
+
+  it("uses the supplied nonce on the next token request", function()
+    assert.are.equals(2, #token_headers)
+    assert.are.equals("next-token-nonce", refresh_payload.nonce)
+  end)
+end)
+
 describe("when the userinfo endpoint requests a DPoP nonce", function()
   local userinfo_headers, first_payload, second_payload
 
@@ -287,6 +393,27 @@ describe("when DPoP is enabled and the access token is refreshed", function()
   end)
 end)
 
+describe("when a DPoP token response is not DPoP-bound", function()
+  local status
+
+  setup(function()
+    test_support.start_server({
+      token_response_token_type = "Bearer",
+      oidc_opts = generate_dpop_opts(),
+    })
+
+    local _
+    _, status = test_support.login()
+  end)
+
+  teardown(test_support.stop_server)
+
+  it("fails with a clear error", function()
+    assert.are.equals(401, status)
+    assert.error_log_contains("authenticate failed: token endpoint returned an access token without token_type DPoP")
+  end)
+end)
+
 describe("when DPoP is enabled without a private key", function()
   local status
 
@@ -324,7 +451,10 @@ describe("when DPoP is enabled without a public JWK", function()
     })
 
     local _
-    _, status = test_support.login()
+    _, status = http.request({
+      url = "http://127.0.0.1/default/t",
+      redirect = false
+    })
   end)
 
   teardown(test_support.stop_server)
@@ -332,6 +462,31 @@ describe("when DPoP is enabled without a public JWK", function()
   it("fails with a clear error", function()
     assert.are.equals(401, status)
     assert.error_log_contains("authenticate failed: Can't use DPoP without opts.dpop_public_jwk")
+  end)
+end)
+
+describe("when DPoP is enabled with a private field in the public JWK", function()
+  local status
+
+  setup(function()
+    local dpop_opts = generate_dpop_opts()
+    dpop_opts.dpop_public_jwk.d = "private"
+    test_support.start_server({
+      oidc_opts = dpop_opts,
+    })
+
+    local _
+    _, status = http.request({
+      url = "http://127.0.0.1/default/t",
+      redirect = false
+    })
+  end)
+
+  teardown(test_support.stop_server)
+
+  it("fails with a clear error", function()
+    assert.are.equals(401, status)
+    assert.error_log_contains("authenticate failed: opts.dpop_public_jwk must not contain private key field 'd'")
   end)
 end)
 
