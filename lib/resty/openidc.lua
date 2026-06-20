@@ -715,6 +715,27 @@ local function openidc_dpop_nonce_from_response(res, accepted_statuses)
   return nil
 end
 
+-- Per-exchange DPoP nonces are kept in request-scoped storage (ngx.ctx) so
+-- that an opts table shared across requests/workers is never mutated with
+-- transient state. The durable, per-user token nonce still lives in the
+-- session; opts.dpop_nonce remains a static, caller-provided seed.
+local function openidc_get_dpop_nonce(opts, key)
+  local nonces = ngx.ctx.openidc_dpop_nonces
+  return (nonces and nonces[key]) or opts.dpop_nonce
+end
+
+local function openidc_set_dpop_nonce(key, nonce)
+  if not nonce then
+    return
+  end
+  local nonces = ngx.ctx.openidc_dpop_nonces
+  if not nonces then
+    nonces = {}
+    ngx.ctx.openidc_dpop_nonces = nonces
+  end
+  nonces[key] = nonce
+end
+
 local function openidc_validate_dpop_token_response(json)
   if not json or not json.access_token then
     return nil
@@ -840,7 +861,7 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
     if ep_name == "token" and opts.use_dpop then
       local proof
       proof, err = openidc_dpop_proof(opts, "POST", endpoint, nil,
-          dpop_nonce or opts.dpop_token_nonce or opts.dpop_nonce)
+          dpop_nonce or openidc_get_dpop_nonce(opts, "token"))
       if err then
         return nil, err, true
       end
@@ -876,7 +897,7 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
 
   local dpop_nonce = ep_name == "token" and opts.use_dpop and openidc_dpop_nonce_from_response(res, { 400, 401 })
   if dpop_nonce then
-    opts.dpop_token_nonce = dpop_nonce
+    openidc_set_dpop_nonce("token", dpop_nonce)
     log(DEBUG, "retrying " .. ep_name .. " endpoint call with DPoP nonce")
     res, err, proof_err = request_token_endpoint(dpop_nonce)
     if proof_err then
@@ -891,7 +912,7 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
 
   local next_dpop_nonce = ep_name == "token" and opts.use_dpop and openidc_dpop_nonce_from_response(res, { 200 })
   if next_dpop_nonce then
-    opts.dpop_token_nonce = next_dpop_nonce
+    openidc_set_dpop_nonce("token", next_dpop_nonce)
   end
   local response_dpop_nonce = next_dpop_nonce or dpop_nonce
 
@@ -1005,7 +1026,7 @@ function openidc.call_userinfo_endpoint(opts, access_token)
     end
 
     local proof, proof_err = openidc_dpop_proof(opts, "GET", opts.discovery.userinfo_endpoint, access_token,
-        dpop_nonce or opts.dpop_userinfo_nonce or opts.dpop_nonce)
+        dpop_nonce or openidc_get_dpop_nonce(opts, "userinfo"))
     if proof_err then
       return nil, proof_err
     end
@@ -1044,7 +1065,7 @@ function openidc.call_userinfo_endpoint(opts, access_token)
 
   local dpop_nonce = opts.use_dpop and openidc_dpop_nonce_from_response(res, { 401 })
   if dpop_nonce then
-    opts.dpop_userinfo_nonce = dpop_nonce
+    openidc_set_dpop_nonce("userinfo", dpop_nonce)
     log(DEBUG, "retrying userinfo endpoint call with DPoP nonce")
     headers, headers_err = userinfo_headers(dpop_nonce)
     if headers_err then
@@ -1865,7 +1886,7 @@ local function openidc_access_token(opts, session, try_to_renew)
     scope = opts.scope and opts.scope or "openid email profile"
   }
   if opts.use_dpop then
-    opts.dpop_token_nonce = session:get("dpop_token_nonce") or opts.dpop_token_nonce
+    openidc_set_dpop_nonce("token", session:get("dpop_token_nonce"))
   end
 
   local json

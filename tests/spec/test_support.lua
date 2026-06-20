@@ -91,6 +91,8 @@ local DEFAULT_REFRESH_RESPONSE_CONTAINS_ID_TOKEN = "true"
 
 local DEFAULT_UNAUTH_ACTION = "nil"
 
+local DEFAULT_SHARE_OIDC_OPTS = "false"
+
 local DEFAULT_DELAY_RESPONSE = "0"
 
 local DEFAULT_INIT_TEMPLATE = [[
@@ -191,7 +193,16 @@ http {
 
         location /default {
             access_by_lua_block {
-              local opts = OIDC_CONFIG
+              -- with SHARE_OIDC_OPTS the opts table is built once and reused
+              -- across requests, modeling a deployment that defines opts at
+              -- module/init scope rather than per request
+              local opts = test_globals.shared_oidc_opts
+              if not opts then
+                opts = OIDC_CONFIG
+                if SHARE_OIDC_OPTS then
+                  test_globals.shared_oidc_opts = opts
+                end
+              end
               if opts.decorate then
                 opts.http_request_decorator = opts.decorate == "body" and test_globals.body_decorator or test_globals.query_decorator
               end
@@ -600,6 +611,7 @@ local function write_template(out, template, custom_config)
     :gsub("ID_TOKEN", serpent.block(id_token, {comment = false }))
     :gsub("ACCESS_TOKEN", serpent.block(access_token, {comment = false }))
     :gsub("UNAUTH_ACTION", custom_config["unauth_action"] and ('"' .. custom_config["unauth_action"] .. '"') or DEFAULT_UNAUTH_ACTION)
+    :gsub("SHARE_OIDC_OPTS", custom_config["share_oidc_opts"] and "true" or DEFAULT_SHARE_OIDC_OPTS)
   out:write(content)
 end
 
