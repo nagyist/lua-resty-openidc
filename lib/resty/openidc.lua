@@ -85,6 +85,192 @@ end
 local openidc = {
   _VERSION = "1.8.0"
 }
+
+local supported_dpop_signing_algs = {
+  ES256 = true,
+  RS256 = true,
+  PS256 = true
+}
+
+local function openidc_unsupported_dpop_signing_alg_error(alg)
+  return "configured value for dpop_signing_alg (" .. alg .. ") is not supported"
+end
+
+local function openidc_supported_discovery_value(values, value)
+  if values == nil then
+    return true
+  end
+  for _, supported in ipairs(values) do
+    if supported == value then
+      return true
+    end
+  end
+  return false
+end
+
+local function openidc_random_jti()
+  local resty_random = require("resty.random")
+  return b64url(resty_random.bytes(32))
+end
+
+local function openidc_sha256(value)
+  local sha256 = require("resty.sha256")
+  local digest = sha256:new()
+  digest:update(value)
+  return digest:final()
+end
+
+local function openidc_dpop_public_jwk_private_field(jwk)
+  for _, field in ipairs({ "d", "p", "q", "dp", "dq", "qi", "oth", "k" }) do
+    if jwk[field] ~= nil then
+      return field
+    end
+  end
+  return nil
+end
+
+local function openidc_validate_dpop_public_jwk(jwk)
+  if jwk == nil then
+    return "Can't use DPoP without opts.dpop_public_jwk"
+  end
+
+  if type(jwk) ~= "table" then
+    return "opts.dpop_public_jwk must be a table"
+  end
+
+  local private_field = openidc_dpop_public_jwk_private_field(jwk)
+  if private_field then
+    return "opts.dpop_public_jwk must not contain private key field '" .. private_field .. "'"
+  end
+
+  return nil
+end
+
+local function openidc_json_member(name, value)
+  return cjson.encode(name) .. ":" .. cjson.encode(value)
+end
+
+local function openidc_dpop_jwk_thumbprint(jwk)
+  local err = openidc_validate_dpop_public_jwk(jwk)
+  if err then
+    return nil, err
+  end
+
+  local json
+  if jwk.kty == "EC" then
+    if not (jwk.crv and jwk.x and jwk.y) then
+      return nil, "opts.dpop_public_jwk with kty 'EC' must contain crv, x, and y"
+    end
+    json = "{" .. table.concat({
+      openidc_json_member("crv", jwk.crv),
+      openidc_json_member("kty", jwk.kty),
+      openidc_json_member("x", jwk.x),
+      openidc_json_member("y", jwk.y),
+    }, ",") .. "}"
+  elseif jwk.kty == "RSA" then
+    if not (jwk.e and jwk.n) then
+      return nil, "opts.dpop_public_jwk with kty 'RSA' must contain e and n"
+    end
+    json = "{" .. table.concat({
+      openidc_json_member("e", jwk.e),
+      openidc_json_member("kty", jwk.kty),
+      openidc_json_member("n", jwk.n),
+    }, ",") .. "}"
+  else
+    return nil, "opts.dpop_public_jwk kty '" .. tostring(jwk.kty) .. "' is not supported"
+  end
+
+  return b64url(openidc_sha256(json))
+end
+
+local function openidc_dpop_htu(uri)
+  return uri and uri:gsub("[#?].*$", "")
+end
+
+local function openidc_dpop_signing_params(pkey, alg)
+  if alg == "ES256" then
+    return nil, { ecdsa_use_raw = true }
+  end
+  if alg == "RS256" then
+    return pkey.PADDINGS.RSA_PKCS1_PADDING
+  end
+  if alg == "PS256" then
+    return pkey.PADDINGS.RSA_PKCS1_PSS_PADDING, { "rsa_pss_saltlen:digest", "rsa_mgf1_md:sha256" }
+  end
+  return nil, nil, openidc_unsupported_dpop_signing_alg_error(alg)
+end
+
+local function openidc_dpop_sign(private_key, header, payload, alg)
+  local signing_input = b64url(cjson.encode(header)) .. "." .. b64url(cjson.encode(payload))
+  local pkey = require("resty.openssl.pkey")
+  local key, err = pkey.new(private_key)
+  if err then
+    return nil, "unable to load DPoP private key: " .. err
+  end
+
+  local padding, opts, unsupported_err = openidc_dpop_signing_params(pkey, alg)
+  if unsupported_err then
+    return nil, unsupported_err
+  end
+
+  local signature
+  signature, err = key:sign(signing_input, "sha256", padding, opts)
+  if err then
+    return nil, "unable to sign DPoP proof: " .. err
+  end
+
+  return signing_input .. "." .. b64url(signature)
+end
+
+local function openidc_dpop_proof(opts, htm, htu, access_token, nonce)
+  if not opts.use_dpop then
+    return nil
+  end
+
+  if not opts.dpop_private_key then
+    return nil, "Can't use DPoP without opts.dpop_private_key"
+  end
+
+  if not opts.dpop_public_jwk then
+    return nil, "Can't use DPoP without opts.dpop_public_jwk"
+  end
+  local public_jwk_err = openidc_validate_dpop_public_jwk(opts.dpop_public_jwk)
+  if public_jwk_err then
+    return nil, public_jwk_err
+  end
+
+  local alg = opts.dpop_signing_alg or "ES256"
+  if not supported_dpop_signing_algs[alg] then
+    return nil, openidc_unsupported_dpop_signing_alg_error(alg)
+  end
+  if opts.discovery and not openidc_supported_discovery_value(opts.discovery.dpop_signing_alg_values_supported, alg) then
+    return nil, "configured value for dpop_signing_alg (" .. alg .. ") NOT found in dpop_signing_alg_values_supported in metadata"
+  end
+
+  local payload = {
+    jti = openidc_random_jti(),
+    htm = htm,
+    htu = openidc_dpop_htu(htu),
+    iat = ngx.time(),
+  }
+
+  if access_token then
+    payload.ath = b64url(openidc_sha256(access_token))
+  end
+
+  nonce = nonce or opts.dpop_nonce
+  if nonce then
+    payload.nonce = nonce
+  end
+
+  local header = {
+    typ = "dpop+jwt",
+    alg = alg,
+    jwk = opts.dpop_public_jwk,
+  }
+
+  return openidc_dpop_sign(opts.dpop_private_key, header, payload, alg)
+end
 openidc.__index = openidc
 
 local function store_in_session(opts, feature)
@@ -219,7 +405,18 @@ end
 
 local function get_first_header(headers, header_name)
   local header = headers[header_name]
-  return get_first(header)
+  if header then
+    return get_first(header)
+  end
+
+  local lower_header_name = string.lower(header_name)
+  for name, value in pairs(headers) do
+    if string.lower(name) == lower_header_name then
+      return get_first(value)
+    end
+  end
+
+  return nil
 end
 
 local function get_first_header_and_strip_whitespace(headers, header_name)
@@ -328,12 +525,8 @@ local function openidc_is_expected_response_status(response_status, expected_sta
   return response_status == expected_status
 end
 
-local sha256 = (require 'resty.sha256'):new()
 local function openidc_s256(verifier)
-  sha256:update(verifier)
-  local s256 = b64url(sha256:final())
-  sha256:reset()
-  return s256
+  return b64url(openidc_sha256(verifier))
 end
 
 local function openidc_pushed_authorization_request(opts, params)
@@ -412,6 +605,15 @@ local function openidc_authorize(opts, session, target_url, prompt)
   -- merge any provided extra parameters
   if opts.authorization_params then
     for k, v in pairs(opts.authorization_params) do params[k] = v end
+  end
+
+  if opts.use_dpop then
+    local dpop_jkt
+    dpop_jkt, err = openidc_dpop_jwk_thumbprint(opts.dpop_public_jwk)
+    if err then
+      return err
+    end
+    params.dpop_jkt = dpop_jkt
   end
 
   -- store state in the session
@@ -501,9 +703,106 @@ local function openidc_configure_proxy(httpc, proxy_opts)
   end
 end
 
+local function openidc_dpop_nonce_from_response(res, accepted_statuses)
+  if not res then
+    return nil
+  end
+  for _, status in ipairs(accepted_statuses) do
+    if res.status == status then
+      return get_first_header(res.headers, "DPoP-Nonce") or get_first_header(res.headers, "dpop-nonce")
+    end
+  end
+  return nil
+end
+
+local function openidc_validate_dpop_token_response(json)
+  if not json or not json.access_token then
+    return nil
+  end
+  if type(json.token_type) ~= "string" or string.lower(json.token_type) ~= "dpop" then
+    return "token endpoint returned an access token without token_type DPoP"
+  end
+  return nil
+end
+
+local function openidc_shallow_copy(source)
+  local target = {}
+  for k, v in pairs(source) do
+    target[k] = v
+  end
+  return target
+end
+
+local function openidc_apply_client_auth(opts, endpoint, body, headers, auth)
+  if not auth then
+    return nil
+  end
+
+  if auth == "client_secret_basic" then
+    if opts.client_secret then
+      headers.Authorization = "Basic " .. b64(ngx.escape_uri(opts.client_id) .. ":" .. ngx.escape_uri(opts.client_secret))
+    else
+    -- client_secret must not be set if Windows Integrated Authentication (WIA) is used with
+    -- Active Directory Federation Services (AD FS) 4.0 (or newer) on Windows Server 2016 (or newer)
+      headers.Authorization = "Basic " .. b64(ngx.escape_uri(opts.client_id) .. ":")
+    end
+    log(DEBUG, "client_secret_basic: authorization header '" .. headers.Authorization .. "'")
+
+  elseif auth == "client_secret_post" then
+    body.client_id = opts.client_id
+    if opts.client_secret then
+      body.client_secret = opts.client_secret
+    end
+    log(DEBUG, "client_secret_post: client_id and client_secret being sent in POST body")
+
+  elseif auth == "private_key_jwt" or auth == "client_secret_jwt" then
+    local key = auth == "private_key_jwt" and opts.client_rsa_private_key or opts.client_secret
+    if not key then
+      return "Can't use " .. auth .. " without a key."
+    end
+    local alg = opts.client_jwt_assertion_alg or (auth == "private_key_jwt" and "RS256" or "HS256")
+    if auth == "private_key_jwt" and alg:sub(1, 2) == "HS" then
+      return "Can't use symmetric client_jwt_assertion_alg " .. alg .. " with private_key_jwt."
+    end
+    if auth == "client_secret_jwt" and alg:sub(1, 2) ~= "HS" then
+      return "Can't use asymmetric client_jwt_assertion_alg " .. alg .. " with client_secret_jwt."
+    end
+    if not openidc_supported_discovery_value(opts.discovery.token_endpoint_auth_signing_alg_values_supported, alg) then
+      return "configured value for client_jwt_assertion_alg (" .. alg .. ") NOT found in token_endpoint_auth_signing_alg_values_supported in metadata"
+    end
+    body.client_id = opts.client_id
+    body.client_assertion_type = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+    local now = ngx.time()
+    local assertion = {
+      header = {
+        typ = "JWT",
+        alg = alg,
+      },
+      payload = {
+        iss = opts.client_id,
+        sub = opts.client_id,
+        aud = opts.client_jwt_assertion_audience or endpoint,
+        jti = openidc_random_jti(),
+        exp = now + (opts.client_jwt_assertion_expires_in and opts.client_jwt_assertion_expires_in or 60),
+        iat = now
+      }
+    }
+    if auth == "private_key_jwt" then
+      assertion.header.kid = opts.client_rsa_private_key_id
+    end
+
+    local r_jwt = require("resty.jwt")
+    body.client_assertion = r_jwt:sign(key, assertion)
+    log(DEBUG, auth .. ": client_id, client_assertion_type and client_assertion being sent in POST body")
+  end
+
+  return nil
+end
+
 -- make a call to the token endpoint
 function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, ignore_body_on_success, expected_status)
   local ignore_body_on_success = ignore_body_on_success or false
+  local err
 
   local ep_name = endpoint_name or 'token'
   if not endpoint then
@@ -513,56 +812,6 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
   local headers = {
     ["Content-Type"] = "application/x-www-form-urlencoded"
   }
-
-  if auth then
-    if auth == "client_secret_basic" then
-      if opts.client_secret then
-        headers.Authorization = "Basic " .. b64(ngx.escape_uri(opts.client_id) .. ":" .. ngx.escape_uri(opts.client_secret))
-      else
-      -- client_secret must not be set if Windows Integrated Authentication (WIA) is used with
-      -- Active Directory Federation Services (AD FS) 4.0 (or newer) on Windows Server 2016 (or newer)
-        headers.Authorization = "Basic " .. b64(ngx.escape_uri(opts.client_id) .. ":")
-      end
-      log(DEBUG, "client_secret_basic: authorization header '" .. headers.Authorization .. "'")
-
-    elseif auth == "client_secret_post" then
-      body.client_id = opts.client_id
-      if opts.client_secret then
-        body.client_secret = opts.client_secret
-      end
-      log(DEBUG, "client_secret_post: client_id and client_secret being sent in POST body")
-
-    elseif auth == "private_key_jwt" or auth == "client_secret_jwt" then
-      local key = auth == "private_key_jwt" and opts.client_rsa_private_key or opts.client_secret
-      if not key then
-        return nil, "Can't use " .. auth .. " without a key."
-      end
-      body.client_id = opts.client_id
-      body.client_assertion_type = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
-      local now = ngx.time()
-      local assertion = {
-        header = {
-          typ = "JWT",
-          alg = auth == "private_key_jwt" and "RS256" or "HS256",
-        },
-        payload = {
-          iss = opts.client_id,
-          sub = opts.client_id,
-          aud = endpoint,
-          jti = ngx.var.request_id,
-          exp = now + (opts.client_jwt_assertion_expires_in and opts.client_jwt_assertion_expires_in or 60),
-          iat = now
-        }
-      }
-      if auth == "private_key_jwt" then
-        assertion.header.kid = opts.client_rsa_private_key_id
-      end
-
-      local r_jwt = require("resty.jwt")
-      body.client_assertion = r_jwt:sign(key, assertion)
-      log(DEBUG, auth .. ": client_id, client_assertion_type and client_assertion being sent in POST body")
-    end
-  end
 
   local pass_cookies = opts.pass_cookies
   if pass_cookies then
@@ -578,27 +827,91 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
     end
   end
 
-  log(DEBUG, "request body for " .. ep_name .. " endpoint call: ", ngx.encode_args(body))
+  local function request_token_endpoint(dpop_nonce)
+    local request_headers = {}
+    for k, v in pairs(headers) do
+      request_headers[k] = v
+    end
+    local request_body = openidc_shallow_copy(body)
+    err = openidc_apply_client_auth(opts, endpoint, request_body, request_headers, auth)
+    if err then
+      return nil, err, true
+    end
+    if ep_name == "token" and opts.use_dpop then
+      local proof
+      proof, err = openidc_dpop_proof(opts, "POST", endpoint, nil,
+          dpop_nonce or opts.dpop_token_nonce or opts.dpop_nonce)
+      if err then
+        return nil, err, true
+      end
+      request_headers.DPoP = proof
+      log(DEBUG, "DPoP proof header added to " .. ep_name .. " endpoint call")
+    end
 
-  local httpc = http.new()
-  openidc_configure_timeouts(httpc, opts.timeout)
-  openidc_configure_proxy(httpc, opts.proxy_opts)
-  local res, err = httpc:request_uri(endpoint, decorate_request(opts.http_request_decorator, {
-    method = "POST",
-    body = ngx.encode_args(body),
-    headers = headers,
-    ssl_verify = (opts.ssl_verify ~= "no"),
-    keepalive = (opts.keepalive ~= "no")
-  }))
+    log(DEBUG, "request body for " .. ep_name .. " endpoint call: ", ngx.encode_args(request_body))
+
+    local httpc = http.new()
+    openidc_configure_timeouts(httpc, opts.timeout)
+    openidc_configure_proxy(httpc, opts.proxy_opts)
+    return httpc:request_uri(endpoint, decorate_request(opts.http_request_decorator, {
+      method = "POST",
+      body = ngx.encode_args(request_body),
+      headers = request_headers,
+      ssl_verify = (opts.ssl_verify ~= "no"),
+      keepalive = (opts.keepalive ~= "no")
+    }))
+  end
+
+  local res
+  local proof_err
+  res, err, proof_err = request_token_endpoint()
+  if proof_err then
+    return nil, err
+  end
   if not res then
     err = "accessing " .. ep_name .. " endpoint (" .. endpoint .. ") failed: " .. err
     log(ERROR, err)
     return nil, err
   end
 
+  local dpop_nonce = ep_name == "token" and opts.use_dpop and openidc_dpop_nonce_from_response(res, { 400, 401 })
+  if dpop_nonce then
+    opts.dpop_token_nonce = dpop_nonce
+    log(DEBUG, "retrying " .. ep_name .. " endpoint call with DPoP nonce")
+    res, err, proof_err = request_token_endpoint(dpop_nonce)
+    if proof_err then
+      return nil, err
+    end
+    if not res then
+      err = "accessing " .. ep_name .. " endpoint (" .. endpoint .. ") failed: " .. err
+      log(ERROR, err)
+      return nil, err
+    end
+  end
+
+  local next_dpop_nonce = ep_name == "token" and opts.use_dpop and openidc_dpop_nonce_from_response(res, { 200 })
+  if next_dpop_nonce then
+    opts.dpop_token_nonce = next_dpop_nonce
+  end
+  local response_dpop_nonce = next_dpop_nonce or dpop_nonce
+
   log(DEBUG, ep_name .. " endpoint response: ", res.body)
 
-  return openidc_parse_json_response(res, ignore_body_on_success, expected_status)
+  local json
+  json, err = openidc_parse_json_response(res, ignore_body_on_success, expected_status)
+  if err then
+    return nil, err
+  end
+  if ep_name == "token" and opts.use_dpop then
+    err = openidc_validate_dpop_token_response(json)
+    if err then
+      return nil, err
+    end
+    if response_dpop_nonce then
+      json._dpop_nonce = response_dpop_nonce
+    end
+  end
+  return json, nil
 end
 
 -- computes access_token expires_in value (in seconds)
@@ -684,24 +997,66 @@ function openidc.call_userinfo_endpoint(opts, access_token)
     return nil, nil
   end
 
-  local headers = {
-    ["Authorization"] = "Bearer " .. access_token,
-  }
+  local function userinfo_headers(dpop_nonce)
+    if not opts.use_dpop then
+      return {
+        ["Authorization"] = "Bearer " .. access_token,
+      }
+    end
 
+    local proof, proof_err = openidc_dpop_proof(opts, "GET", opts.discovery.userinfo_endpoint, access_token,
+        dpop_nonce or opts.dpop_userinfo_nonce or opts.dpop_nonce)
+    if proof_err then
+      return nil, proof_err
+    end
+    return {
+      ["Authorization"] = "DPoP " .. access_token,
+      ["DPoP"] = proof,
+    }
+  end
+
+  local headers, headers_err = userinfo_headers()
+  if headers_err then
+    return nil, headers_err
+  end
   log(DEBUG, "authorization header '" .. headers.Authorization .. "'")
+  if headers.DPoP then
+    log(DEBUG, "DPoP proof header added to userinfo endpoint call")
+  end
 
-  local httpc = http.new()
-  openidc_configure_timeouts(httpc, opts.timeout)
-  openidc_configure_proxy(httpc, opts.proxy_opts)
-  local res, err = httpc:request_uri(opts.discovery.userinfo_endpoint,
-                                     decorate_request(opts.http_request_decorator, {
-    headers = headers,
-    ssl_verify = (opts.ssl_verify ~= "no"),
-    keepalive = (opts.keepalive ~= "no")
-  }))
+  local function request_userinfo(request_headers)
+    local httpc = http.new()
+    openidc_configure_timeouts(httpc, opts.timeout)
+    openidc_configure_proxy(httpc, opts.proxy_opts)
+    return httpc:request_uri(opts.discovery.userinfo_endpoint,
+                             decorate_request(opts.http_request_decorator, {
+      headers = request_headers,
+      ssl_verify = (opts.ssl_verify ~= "no"),
+      keepalive = (opts.keepalive ~= "no")
+    }))
+  end
+
+  local res, err = request_userinfo(headers)
   if not res then
     err = "accessing (" .. opts.discovery.userinfo_endpoint .. ") failed: " .. err
     return nil, err
+  end
+
+  local dpop_nonce = opts.use_dpop and openidc_dpop_nonce_from_response(res, { 401 })
+  if dpop_nonce then
+    opts.dpop_userinfo_nonce = dpop_nonce
+    log(DEBUG, "retrying userinfo endpoint call with DPoP nonce")
+    headers, headers_err = userinfo_headers(dpop_nonce)
+    if headers_err then
+      return nil, headers_err
+    end
+    log(DEBUG, "authorization header '" .. headers.Authorization .. "'")
+    log(DEBUG, "DPoP proof header added to userinfo endpoint call")
+    res, err = request_userinfo(headers)
+    if not res then
+      err = "accessing (" .. opts.discovery.userinfo_endpoint .. ") failed: " .. err
+      return nil, err
+    end
   end
 
   log(DEBUG, "userinfo response: ", res.body)
@@ -1240,6 +1595,10 @@ local function openidc_authorization_response(opts, session)
     session:set("id_token", id_token)
   end
 
+  if opts.use_dpop and json._dpop_nonce then
+    session:set("dpop_token_nonce", json._dpop_nonce)
+  end
+
   if store_in_session(opts, 'user') then
     -- call the user info endpoint
     -- TODO: should this error be checked?
@@ -1505,6 +1864,9 @@ local function openidc_access_token(opts, session, try_to_renew)
     refresh_token = refresh_token,
     scope = opts.scope and opts.scope or "openid email profile"
   }
+  if opts.use_dpop then
+    opts.dpop_token_nonce = session:get("dpop_token_nonce") or opts.dpop_token_nonce
+  end
 
   local json
   json, err = openidc.call_token_endpoint(opts, opts.discovery.token_endpoint, body, opts.token_endpoint_auth_method)
@@ -1523,6 +1885,9 @@ local function openidc_access_token(opts, session, try_to_renew)
 
   session:set("access_token", json.access_token)
   session:set("access_token_expiration", current_time + openidc_access_token_expires_in(opts, json.expires_in))
+  if opts.use_dpop and json._dpop_nonce then
+    session:set("dpop_token_nonce", json._dpop_nonce)
+  end
   if json.refresh_token then
     session:set("refresh_token", json.refresh_token)
   end
