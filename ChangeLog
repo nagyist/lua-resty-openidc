@@ -7,6 +7,8 @@ unreleased
   through the opt-in use_dpop option.
 - added ES256, RS256, and PS256 signing support for DPoP proofs.
 - added DPoP nonce retry support for token and userinfo endpoint calls.
+- fixed DPoP token endpoint nonce retry handling for authorization server
+  responses that use the RFC 9449 `use_dpop_nonce` 400 challenge.
 - added support for configuring the client assertion JWT signing algorithm
   with client_jwt_assertion_alg.
 

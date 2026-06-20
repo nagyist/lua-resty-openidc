@@ -616,11 +616,16 @@ local function openidc_configure_proxy(httpc, proxy_opts)
   end
 end
 
-local function openidc_dpop_nonce_from_response(res)
-  if not res or res.status ~= 401 then
+local function openidc_dpop_nonce_from_response(res, accepted_statuses)
+  if not res then
     return nil
   end
-  return get_first_header(res.headers, "DPoP-Nonce") or get_first_header(res.headers, "dpop-nonce")
+  for _, status in ipairs(accepted_statuses) do
+    if res.status == status then
+      return get_first_header(res.headers, "DPoP-Nonce") or get_first_header(res.headers, "dpop-nonce")
+    end
+  end
+  return nil
 end
 
 -- make a call to the token endpoint
@@ -752,7 +757,7 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
     return nil, err
   end
 
-  local dpop_nonce = ep_name == "token" and opts.use_dpop and openidc_dpop_nonce_from_response(res)
+  local dpop_nonce = ep_name == "token" and opts.use_dpop and openidc_dpop_nonce_from_response(res, { 400, 401 })
   if dpop_nonce then
     log(DEBUG, "retrying " .. ep_name .. " endpoint call with DPoP nonce")
     res, err, proof_err = request_token_endpoint(dpop_nonce)
@@ -898,7 +903,7 @@ function openidc.call_userinfo_endpoint(opts, access_token)
     return nil, err
   end
 
-  local dpop_nonce = opts.use_dpop and openidc_dpop_nonce_from_response(res)
+  local dpop_nonce = opts.use_dpop and openidc_dpop_nonce_from_response(res, { 401 })
   if dpop_nonce then
     log(DEBUG, "retrying userinfo endpoint call with DPoP nonce")
     headers, headers_err = userinfo_headers(dpop_nonce)

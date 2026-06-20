@@ -248,10 +248,10 @@ http {
                     challenged = assert(io.open("/tmp/token-dpop-nonce-challenged", "w"))
                     challenged:write("1")
                     assert(challenged:close())
-                    ngx.status = 401
+                    ngx.status = 400
                     ngx.header["DPoP-Nonce"] = "token-nonce"
                     ngx.say('{"error":"use_dpop_nonce"}')
-                    ngx.exit(401)
+                    ngx.exit(400)
                   end
                 end
                 local args = ngx.req.get_post_args()
