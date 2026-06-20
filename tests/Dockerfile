@@ -6,8 +6,9 @@ RUN ["luarocks", "install", "lua-resty-http"]
 RUN ["luarocks", "install", "lua-resty-jwt"]
 
 # install test dependencies
-RUN ["apt-get", "update"]
-RUN ["apt-get", "install", "-y", "git"]
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
 RUN ["luarocks", "install", "busted"]
 RUN ["luarocks", "install", "LuaSocket"]
 RUN ["luarocks", "install", "serpent"]
@@ -18,7 +19,9 @@ ADD lib/resty/openidc.lua /usr/local/openresty/lualib/resty/openidc.lua
 
 # mount tests
 ADD tests/spec /spec
+RUN mkdir -p /usr/local/openresty/nginx/client_body_temp \
+    && chown -R nobody:nogroup /spec /usr/local/openresty/nginx
 
-CMD busted -C spec -o plainTerminal . && (test -z "$coverage" || (\
-    luacov -c /spec/luacov/settings.luacov && \
-    cat /spec/luacov/luacov.report.out ) )
+USER nobody
+
+CMD ["sh", "-c", "busted -C spec -o plainTerminal . && (test -z \"$coverage\" || (luacov -c /spec/luacov/settings.luacov && cat /spec/luacov/luacov.report.out))"]

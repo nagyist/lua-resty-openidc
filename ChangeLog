@@ -1,8 +1,28 @@
 unreleased
+- hardened the test Docker image by minimizing apt-installed packages
+  and running the test suite as a non-root user.
 - added support for OAuth 2.0 Pushed Authorization Requests (PAR,
   RFC 9126) through the opt-in use_par option.
 - propagate errors returned by the `lifecycle.on_created` hook during
   authorization redirects.
+- add redirect_after_logout_with_client_id option to send client_id on
+  logout when id_token_hint is not available; see #518
+- added support for OAuth 2.0 DPoP client proof generation (RFC 9449)
+  through the opt-in use_dpop option.
+- added ES256, RS256, and PS256 signing support for DPoP proofs.
+- added DPoP nonce retry support for token and userinfo endpoint calls.
+- fixed DPoP token endpoint nonce retry handling for authorization server
+  responses that use the RFC 9449 `use_dpop_nonce` 400 challenge.
+- added DPoP authorization code binding through the `dpop_jkt` authorization
+  request parameter.
+- validate DPoP token responses with `token_type=DPoP` and reject public JWKs
+  that contain private key material.
+- remember authorization server-provided DPoP nonces from successful token
+  responses for subsequent token requests.
+- added support for configuring the client assertion JWT signing algorithm
+  with client_jwt_assertion_alg.
+- rebuild client assertion JWTs when retrying token endpoint calls after a
+  DPoP nonce challenge.
 - don't duplicate introspection client credentials in both the
   Authorization header and POST body when using client_secret_basic;
   see #556

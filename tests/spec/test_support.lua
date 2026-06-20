@@ -80,6 +80,9 @@ local DEFAULT_TOKEN_RESPONSE_EXPIRES_IN = "3600"
 
 local DEFAULT_TOKEN_RESPONSE_CONTAINS_REFRESH_TOKEN = "true"
 local DEFAULT_REFRESHING_TOKEN_FAILS = "false"
+local DEFAULT_TOKEN_DPOP_NONCE_CHALLENGE = "false"
+local DEFAULT_TOKEN_DPOP_NONCE_SUCCESS = "nil"
+local DEFAULT_USERINFO_DPOP_NONCE_CHALLENGE = "false"
 local DEFAULT_FAKE_ACCESS_TOKEN_SIGNATURE = "false"
 local DEFAULT_FAKE_ID_TOKEN_SIGNATURE = "false"
 local DEFAULT_BREAK_ID_TOKEN_SIGNATURE = "false"
@@ -235,7 +238,23 @@ http {
                 ngx.log(ngx.ERR, "Received token request: " .. ngx.req.get_body_data())
                 local auth = ngx.req.get_headers()["Authorization"]
                 ngx.log(ngx.ERR, "token authorization header: " .. (auth and auth or ""))
+                local dpop = ngx.req.get_headers()["DPoP"]
+                ngx.log(ngx.ERR, "token dpop header: " .. (dpop and dpop or ""))
                 ngx.header.content_type = 'application/json;charset=UTF-8'
+                if TOKEN_DPOP_NONCE_CHALLENGE then
+                  local challenged = io.open("/tmp/token-dpop-nonce-challenged", "r")
+                  if challenged then
+                    assert(challenged:close())
+                  else
+                    challenged = assert(io.open("/tmp/token-dpop-nonce-challenged", "w"))
+                    challenged:write("1")
+                    assert(challenged:close())
+                    ngx.status = 400
+                    ngx.header["DPoP-Nonce"] = "token-nonce"
+                    ngx.say('{"error":"use_dpop_nonce"}')
+                    ngx.exit(400)
+                  end
+                end
                 local args = ngx.req.get_post_args()
                 local id_token
                 if args.grant_type == "authorization_code" then
@@ -276,8 +295,12 @@ http {
                   expires_in = TOKEN_RESPONSE_EXPIRES_IN,
                   refresh_token = TOKEN_RESPONSE_CONTAINS_REFRESH_TOKEN and refresh_token or nil,
                 }
+                token_response.token_type = TOKEN_RESPONSE_TOKEN_TYPE or (dpop and "DPoP" or "Bearer")
                 if args.grant_type == "authorization_code" or REFRESH_RESPONSE_CONTAINS_ID_TOKEN then
                   token_response.id_token = jwt_token
+                end
+                if TOKEN_DPOP_NONCE_SUCCESS then
+                  ngx.header["DPoP-Nonce"] = TOKEN_DPOP_NONCE_SUCCESS
                 end
                 test_globals.delay(TOKEN_DELAY_RESPONSE)
                 ngx.say(test_globals.cjson.encode(token_response))
@@ -367,7 +390,23 @@ http {
                 test_globals.delay(USERINFO_DELAY_RESPONSE)
                 local auth = ngx.req.get_headers()["Authorization"]
                 ngx.log(ngx.ERR, "userinfo authorization header: " .. (auth and auth or ""))
+                local dpop = ngx.req.get_headers()["DPoP"]
+                ngx.log(ngx.ERR, "userinfo dpop header: " .. (dpop and dpop or ""))
                 ngx.header.content_type = 'application/json;charset=UTF-8'
+                if USERINFO_DPOP_NONCE_CHALLENGE then
+                  local challenged = io.open("/tmp/userinfo-dpop-nonce-challenged", "r")
+                  if challenged then
+                    assert(challenged:close())
+                  else
+                    challenged = assert(io.open("/tmp/userinfo-dpop-nonce-challenged", "w"))
+                    challenged:write("1")
+                    assert(challenged:close())
+                    ngx.status = 401
+                    ngx.header["DPoP-Nonce"] = "userinfo-nonce"
+                    ngx.say('{"error":"use_dpop_nonce"}')
+                    ngx.exit(401)
+                  end
+                end
                 ngx.say(test_globals.cjson.encode(USERINFO))
             }
         }
@@ -502,6 +541,8 @@ local function write_template(out, template, custom_config)
   local token_response_expires_in = custom_config["token_response_expires_in"] or DEFAULT_TOKEN_RESPONSE_EXPIRES_IN
   local token_response_contains_refresh_token = custom_config["token_response_contains_refresh_token"]
     or DEFAULT_TOKEN_RESPONSE_CONTAINS_REFRESH_TOKEN
+  local token_response_token_type = custom_config["token_response_token_type"] and
+    ('"' .. custom_config["token_response_token_type"] .. '"') or "nil"
   local refreshing_token_fails = custom_config["refreshing_token_fails"] or DEFAULT_REFRESHING_TOKEN_FAILS
   local refresh_response_contains_id_token = custom_config["refresh_response_contains_id_token"] or DEFAULT_REFRESH_RESPONSE_CONTAINS_ID_TOKEN
   local access_token_opts = merge(merge({}, DEFAULT_OIDC_CONFIG), custom_config["access_token_opts"] or {})
@@ -535,7 +576,12 @@ local function write_template(out, template, custom_config)
     :gsub("INTROSPECTION_OPTS", serpent.block(introspection_opts, {comment = false }))
     :gsub("TOKEN_RESPONSE_EXPIRES_IN", token_response_expires_in)
     :gsub("TOKEN_RESPONSE_CONTAINS_REFRESH_TOKEN", token_response_contains_refresh_token)
+    :gsub("TOKEN_RESPONSE_TOKEN_TYPE", token_response_token_type)
     :gsub("REFRESHING_TOKEN_FAILS", refreshing_token_fails)
+    :gsub("TOKEN_DPOP_NONCE_CHALLENGE", custom_config["token_dpop_nonce_challenge"] or DEFAULT_TOKEN_DPOP_NONCE_CHALLENGE)
+    :gsub("TOKEN_DPOP_NONCE_SUCCESS", custom_config["token_dpop_nonce_success"] and
+      ('"' .. custom_config["token_dpop_nonce_success"] .. '"') or DEFAULT_TOKEN_DPOP_NONCE_SUCCESS)
+    :gsub("USERINFO_DPOP_NONCE_CHALLENGE", custom_config["userinfo_dpop_nonce_challenge"] or DEFAULT_USERINFO_DPOP_NONCE_CHALLENGE)
     :gsub("REFRESH_RESPONSE_CONTAINS_ID_TOKEN", refresh_response_contains_id_token)
     :gsub("ACCESS_TOKEN_OPTS", serpent.block(access_token_opts, {comment = false }))
     :gsub("JWK_DELAY_RESPONSE", ((custom_config["delay_response"] or {}).jwk or DEFAULT_DELAY_RESPONSE))
@@ -595,6 +641,8 @@ end
 -- - none_alg_id_token_signature whether to use the "none" alg when signing the id token
 function test_support.start_server(custom_config)
   assert(os.execute("rm -rf /tmp/server"), "failed to remove old server dir")
+  os.remove("/tmp/token-dpop-nonce-challenged")
+  os.remove("/tmp/userinfo-dpop-nonce-challenged")
   assert(os.execute("mkdir -p /tmp/server/conf"), "failed to create server dir")
   assert(os.execute("mkdir -p /tmp/server/logs"), "failed to create log dir")
   local out = assert(io.open("/tmp/server/conf/test_globals.lua", "w"))
