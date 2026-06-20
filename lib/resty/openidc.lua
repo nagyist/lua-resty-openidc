@@ -108,7 +108,7 @@ local function openidc_supported_discovery_value(values, value)
   return false
 end
 
-local function openidc_dpop_jti()
+local function openidc_random_jti()
   local resty_random = require("resty.random")
   return b64url(resty_random.bytes(32))
 end
@@ -248,7 +248,7 @@ local function openidc_dpop_proof(opts, htm, htu, access_token, nonce)
   end
 
   local payload = {
-    jti = openidc_dpop_jti(),
+    jti = openidc_random_jti(),
     htm = htm,
     htu = openidc_dpop_htu(htu),
     iat = ngx.time(),
@@ -725,6 +725,80 @@ local function openidc_validate_dpop_token_response(json)
   return nil
 end
 
+local function openidc_shallow_copy(source)
+  local target = {}
+  for k, v in pairs(source) do
+    target[k] = v
+  end
+  return target
+end
+
+local function openidc_apply_client_auth(opts, endpoint, body, headers, auth)
+  if not auth then
+    return nil
+  end
+
+  if auth == "client_secret_basic" then
+    if opts.client_secret then
+      headers.Authorization = "Basic " .. b64(ngx.escape_uri(opts.client_id) .. ":" .. ngx.escape_uri(opts.client_secret))
+    else
+    -- client_secret must not be set if Windows Integrated Authentication (WIA) is used with
+    -- Active Directory Federation Services (AD FS) 4.0 (or newer) on Windows Server 2016 (or newer)
+      headers.Authorization = "Basic " .. b64(ngx.escape_uri(opts.client_id) .. ":")
+    end
+    log(DEBUG, "client_secret_basic: authorization header '" .. headers.Authorization .. "'")
+
+  elseif auth == "client_secret_post" then
+    body.client_id = opts.client_id
+    if opts.client_secret then
+      body.client_secret = opts.client_secret
+    end
+    log(DEBUG, "client_secret_post: client_id and client_secret being sent in POST body")
+
+  elseif auth == "private_key_jwt" or auth == "client_secret_jwt" then
+    local key = auth == "private_key_jwt" and opts.client_rsa_private_key or opts.client_secret
+    if not key then
+      return "Can't use " .. auth .. " without a key."
+    end
+    local alg = opts.client_jwt_assertion_alg or (auth == "private_key_jwt" and "RS256" or "HS256")
+    if auth == "private_key_jwt" and alg:sub(1, 2) == "HS" then
+      return "Can't use symmetric client_jwt_assertion_alg " .. alg .. " with private_key_jwt."
+    end
+    if auth == "client_secret_jwt" and alg:sub(1, 2) ~= "HS" then
+      return "Can't use asymmetric client_jwt_assertion_alg " .. alg .. " with client_secret_jwt."
+    end
+    if not openidc_supported_discovery_value(opts.discovery.token_endpoint_auth_signing_alg_values_supported, alg) then
+      return "configured value for client_jwt_assertion_alg (" .. alg .. ") NOT found in token_endpoint_auth_signing_alg_values_supported in metadata"
+    end
+    body.client_id = opts.client_id
+    body.client_assertion_type = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+    local now = ngx.time()
+    local assertion = {
+      header = {
+        typ = "JWT",
+        alg = alg,
+      },
+      payload = {
+        iss = opts.client_id,
+        sub = opts.client_id,
+        aud = opts.client_jwt_assertion_audience or endpoint,
+        jti = openidc_random_jti(),
+        exp = now + (opts.client_jwt_assertion_expires_in and opts.client_jwt_assertion_expires_in or 60),
+        iat = now
+      }
+    }
+    if auth == "private_key_jwt" then
+      assertion.header.kid = opts.client_rsa_private_key_id
+    end
+
+    local r_jwt = require("resty.jwt")
+    body.client_assertion = r_jwt:sign(key, assertion)
+    log(DEBUG, auth .. ": client_id, client_assertion_type and client_assertion being sent in POST body")
+  end
+
+  return nil
+end
+
 -- make a call to the token endpoint
 function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, ignore_body_on_success, expected_status)
   local ignore_body_on_success = ignore_body_on_success or false
@@ -738,66 +812,6 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
   local headers = {
     ["Content-Type"] = "application/x-www-form-urlencoded"
   }
-
-  if auth then
-    if auth == "client_secret_basic" then
-      if opts.client_secret then
-        headers.Authorization = "Basic " .. b64(ngx.escape_uri(opts.client_id) .. ":" .. ngx.escape_uri(opts.client_secret))
-      else
-      -- client_secret must not be set if Windows Integrated Authentication (WIA) is used with
-      -- Active Directory Federation Services (AD FS) 4.0 (or newer) on Windows Server 2016 (or newer)
-        headers.Authorization = "Basic " .. b64(ngx.escape_uri(opts.client_id) .. ":")
-      end
-      log(DEBUG, "client_secret_basic: authorization header '" .. headers.Authorization .. "'")
-
-    elseif auth == "client_secret_post" then
-      body.client_id = opts.client_id
-      if opts.client_secret then
-        body.client_secret = opts.client_secret
-      end
-      log(DEBUG, "client_secret_post: client_id and client_secret being sent in POST body")
-
-    elseif auth == "private_key_jwt" or auth == "client_secret_jwt" then
-      local key = auth == "private_key_jwt" and opts.client_rsa_private_key or opts.client_secret
-      if not key then
-        return nil, "Can't use " .. auth .. " without a key."
-      end
-      local alg = opts.client_jwt_assertion_alg or (auth == "private_key_jwt" and "RS256" or "HS256")
-      if auth == "private_key_jwt" and alg:sub(1, 2) == "HS" then
-        return nil, "Can't use symmetric client_jwt_assertion_alg " .. alg .. " with private_key_jwt."
-      end
-      if auth == "client_secret_jwt" and alg:sub(1, 2) ~= "HS" then
-        return nil, "Can't use asymmetric client_jwt_assertion_alg " .. alg .. " with client_secret_jwt."
-      end
-      if not openidc_supported_discovery_value(opts.discovery.token_endpoint_auth_signing_alg_values_supported, alg) then
-        return nil, "configured value for client_jwt_assertion_alg (" .. alg .. ") NOT found in token_endpoint_auth_signing_alg_values_supported in metadata"
-      end
-      body.client_id = opts.client_id
-      body.client_assertion_type = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
-      local now = ngx.time()
-      local assertion = {
-        header = {
-          typ = "JWT",
-          alg = alg,
-        },
-        payload = {
-          iss = opts.client_id,
-          sub = opts.client_id,
-          aud = opts.client_jwt_assertion_audience or endpoint,
-          jti = ngx.var.request_id,
-          exp = now + (opts.client_jwt_assertion_expires_in and opts.client_jwt_assertion_expires_in or 60),
-          iat = now
-        }
-      }
-      if auth == "private_key_jwt" then
-        assertion.header.kid = opts.client_rsa_private_key_id
-      end
-
-      local r_jwt = require("resty.jwt")
-      body.client_assertion = r_jwt:sign(key, assertion)
-      log(DEBUG, auth .. ": client_id, client_assertion_type and client_assertion being sent in POST body")
-    end
-  end
 
   local pass_cookies = opts.pass_cookies
   if pass_cookies then
@@ -813,12 +827,15 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
     end
   end
 
-  log(DEBUG, "request body for " .. ep_name .. " endpoint call: ", ngx.encode_args(body))
-
   local function request_token_endpoint(dpop_nonce)
     local request_headers = {}
     for k, v in pairs(headers) do
       request_headers[k] = v
+    end
+    local request_body = openidc_shallow_copy(body)
+    err = openidc_apply_client_auth(opts, endpoint, request_body, request_headers, auth)
+    if err then
+      return nil, err, true
     end
     if ep_name == "token" and opts.use_dpop then
       local proof
@@ -831,12 +848,14 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
       log(DEBUG, "DPoP proof header added to " .. ep_name .. " endpoint call")
     end
 
+    log(DEBUG, "request body for " .. ep_name .. " endpoint call: ", ngx.encode_args(request_body))
+
     local httpc = http.new()
     openidc_configure_timeouts(httpc, opts.timeout)
     openidc_configure_proxy(httpc, opts.proxy_opts)
     return httpc:request_uri(endpoint, decorate_request(opts.http_request_decorator, {
       method = "POST",
-      body = ngx.encode_args(body),
+      body = ngx.encode_args(request_body),
       headers = request_headers,
       ssl_verify = (opts.ssl_verify ~= "no"),
       keepalive = (opts.keepalive ~= "no")

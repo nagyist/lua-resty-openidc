@@ -17,6 +17,8 @@ unreleased
   responses for subsequent token requests.
 - added support for configuring the client assertion JWT signing algorithm
   with client_jwt_assertion_alg.
+- rebuild client assertion JWTs when retrying token endpoint calls after a
+  DPoP nonce challenge.
 
 09/13/204
 - cross-tenant requests are fixed with lua-resty session 4.0.x; closes #526

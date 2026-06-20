@@ -103,6 +103,15 @@ local function logged_dpop_headers(prefix)
   return headers
 end
 
+local function logged_client_assertions(prefix)
+  local assertions = {}
+  local log = test_support.load("/tmp/server/logs/error.log")
+  for assertion in log:gmatch("request body for " .. prefix .. " endpoint call: [^\n]*client_assertion=([A-Za-z0-9_%-%.]+)") do
+    table.insert(assertions, assertion)
+  end
+  return assertions
+end
+
 local function logged_par_request_body()
   local log = test_support.load("/tmp/server/logs/error.log")
   return log:match("Received par request: ([^\n]+)")
@@ -311,6 +320,36 @@ describe("when the token endpoint requests a DPoP nonce", function()
     assert.are.equals(2, #token_headers)
     assert.is_nil(first_payload.nonce)
     assert.are.equals("token-nonce", second_payload.nonce)
+  end)
+end)
+
+describe("when the token endpoint requests a DPoP nonce with private_key_jwt", function()
+  local client_assertions, first_assertion_payload, second_assertion_payload
+
+  setup(function()
+    local dpop_opts = generate_dpop_opts()
+    dpop_opts.discovery.token_endpoint_auth_methods_supported = { "private_key_jwt" }
+    dpop_opts.discovery.token_endpoint_auth_signing_alg_values_supported = { "RS256" }
+    dpop_opts.token_endpoint_auth_method = "private_key_jwt"
+    dpop_opts.client_rsa_private_key = rsa_private_key
+
+    test_support.start_server({
+      token_dpop_nonce_challenge = "true",
+      oidc_opts = dpop_opts,
+    })
+    test_support.login()
+
+    client_assertions = logged_client_assertions("token")
+    _, first_assertion_payload = decode_jwt(client_assertions[1])
+    _, second_assertion_payload = decode_jwt(client_assertions[2])
+  end)
+
+  teardown(test_support.stop_server)
+
+  it("rebuilds the client assertion on the retry", function()
+    assert.are.equals(2, #client_assertions)
+    assert.are_not.equals(client_assertions[1], client_assertions[2])
+    assert.are_not.equals(first_assertion_payload.jti, second_assertion_payload.jti)
   end)
 end)
 
