@@ -299,6 +299,19 @@ http {
             }
         }
 
+        location /par-200 {
+            content_by_lua_block {
+                ngx.req.read_body()
+                ngx.log(ngx.ERR, "Received par request: " .. ngx.req.get_body_data())
+                ngx.header.content_type = 'application/json;charset=UTF-8'
+                ngx.status = 200
+                ngx.say(test_globals.cjson.encode({
+                  request_uri = "urn:ietf:params:oauth:request_uri:test-200",
+                  expires_in = 90,
+                }))
+            }
+        }
+
         location /par-no-request-uri {
             content_by_lua_block {
                 ngx.header.content_type = 'application/json;charset=UTF-8'

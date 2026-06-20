@@ -1,6 +1,8 @@
 unreleased
 - added support for OAuth 2.0 Pushed Authorization Requests (PAR,
   RFC 9126) through the opt-in use_par option.
+- propagate errors returned by the `lifecycle.on_created` hook during
+  authorization redirects.
 
 09/13/204
 - cross-tenant requests are fixed with lua-resty session 4.0.x; closes #526

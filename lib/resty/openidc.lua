@@ -77,6 +77,11 @@ local supported_token_auth_methods = {
   client_secret_jwt = token_auth_method_precondition('client_secret_jwt', 'client_secret')
 }
 
+local function can_use_token_auth_method(method, opts)
+  local supported = supported_token_auth_methods[method]
+  return supported and (type(supported) ~= 'function' or supported(opts))
+end
+
 local openidc = {
   _VERSION = "1.8.0"
 }
@@ -339,16 +344,18 @@ local function openidc_pushed_authorization_request(opts, params)
   end
 
   local auth = opts.pushed_authorization_request_endpoint_auth_method
-      or opts.token_endpoint_auth_method
-  local supported_auth = supported_token_auth_methods[auth]
-  if auth and (not supported_auth
-      or (type(supported_auth) == 'function' and not supported_auth(opts))) then
-    return nil, "configured value for pushed_authorization_request_endpoint_auth_method ("
+  local auth_option = "pushed_authorization_request_endpoint_auth_method"
+  if not auth then
+    auth = opts.token_endpoint_auth_method
+    auth_option = "token_endpoint_auth_method"
+  end
+  if auth and not can_use_token_auth_method(auth, opts) then
+    return nil, "configured value for " .. auth_option .. " ("
         .. auth .. ") is not supported"
   end
 
   local json, err = openidc.call_token_endpoint(opts, endpoint, params, auth,
-      "pushed authorization request", false, 201)
+      "pushed authorization request", false, { 200, 201 })
   if err then
     return nil, err
   end
@@ -712,11 +719,6 @@ function openidc.call_userinfo_endpoint(opts, access_token)
 
   -- parse the response from the user info endpoint
   return openidc_parse_json_response(res)
-end
-
-local function can_use_token_auth_method(method, opts)
-  local supported = supported_token_auth_methods[method]
-  return supported and (type(supported) ~= 'function' or supported(opts))
 end
 
 -- get the token endpoint authentication method
