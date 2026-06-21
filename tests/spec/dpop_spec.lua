@@ -383,6 +383,40 @@ describe("when the authorization server provides the next DPoP nonce on success"
   end)
 end)
 
+describe("when two independent sessions obtain DPoP nonces in sequence", function()
+  local token_headers, first_payload, second_payload
+
+  setup(function()
+    -- share_oidc_opts reuses a single opts table across requests, modeling a
+    -- deployment that defines opts once at module/init scope. Without it the
+    -- harness rebuilds opts per request, which would hide a cross-request leak.
+    test_support.start_server({
+      share_oidc_opts = true,
+      token_dpop_nonce_success = "session-one-nonce",
+      oidc_opts = generate_dpop_opts(),
+    })
+    -- first user logs in; the token endpoint hands out a DPoP nonce on success
+    test_support.login()
+    -- a second, independent user logs in with a fresh session
+    test_support.login()
+
+    token_headers = logged_dpop_headers("token")
+    _, first_payload = decode_jwt(token_headers[1])
+    _, second_payload = decode_jwt(token_headers[2])
+  end)
+
+  teardown(test_support.stop_server)
+
+  it("does not leak the first session's nonce into the second session's token request", function()
+    assert.are.equals(2, #token_headers)
+    -- neither code exchange should carry a nonce: the first session has none
+    -- yet, and the second must not inherit the first's via shared opts state
+    assert.is_nil(first_payload.nonce)
+    assert.are_not.equals("session-one-nonce", second_payload.nonce)
+    assert.is_nil(second_payload.nonce)
+  end)
+end)
+
 describe("when the userinfo endpoint requests a DPoP nonce", function()
   local userinfo_headers, first_payload, second_payload
 

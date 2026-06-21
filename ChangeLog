@@ -1,4 +1,8 @@
 unreleased
+- scope DPoP nonces to the current request (via ngx.ctx) instead of
+  mutating the shared opts table, preventing one session's DPoP nonce
+  from leaking into another request; the per-user token nonce continues
+  to be persisted in the session.
 - added a security policy for privately reporting vulnerabilities.
 - added maintenance automation for dependency updates and pull request
   contribution checks.
