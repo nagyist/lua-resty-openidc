@@ -618,6 +618,9 @@ end
 -- starts a server instance with some customizations of the configuration.
 -- expects custom_config to be a table with:
 -- - oidc_opts is a table containing options that are accepted by oidc.authenticate
+-- - share_oidc_opts reuses a single oidc_opts table across requests (modeling a
+--   deployment that defines opts once at module/init scope) rather than rebuilding
+--   it per request; defaults to false
 -- - remove_oidc_config_keys is an array of keys to remove from the oidc configuration
 -- - id_token is a table containing id_token claims
 -- - remove_id_token_claims is an array of claims to remove from the id_token
