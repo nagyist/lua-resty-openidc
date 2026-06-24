@@ -30,6 +30,9 @@ unreleased
   with client_jwt_assertion_alg.
 - rebuild client assertion JWTs when retrying token endpoint calls after a
   DPoP nonce challenge.
+- keep pending authorization states separate within the same browser
+  session so concurrent tabs do not overwrite state, nonce, PKCE verifier,
+  or original redirect URI values; see #553.
 
 09/13/204
 - cross-tenant requests are fixed with lua-resty session 4.0.x; closes #526
