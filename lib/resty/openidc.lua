@@ -560,6 +560,45 @@ local function openidc_pushed_authorization_request(opts, params)
   return json
 end
 
+local function openidc_prune_authorization_states(opts, authorization_states, current_state)
+  local max_age = opts.authorization_state_expires_in or 300
+  local max_number = opts.authorization_state_max_number or 10
+  local now = ngx.time()
+
+  if max_age < 0 then
+    max_age = 0
+  end
+  if max_number < 1 then
+    max_number = 1
+  end
+
+  for state, data in pairs(authorization_states) do
+    if not data.created_at or now - data.created_at > max_age then
+      authorization_states[state] = nil
+    end
+  end
+
+  local count = 0
+  for _ in pairs(authorization_states) do
+    count = count + 1
+  end
+
+  while count > max_number do
+    local oldest_state, oldest_at
+    for state, data in pairs(authorization_states) do
+      local created_at = data.created_at or 0
+      if state ~= current_state and (not oldest_at or created_at < oldest_at) then
+        oldest_state, oldest_at = state, created_at
+      end
+    end
+    if not oldest_state then
+      break
+    end
+    authorization_states[oldest_state] = nil
+    count = count - 1
+  end
+end
+
 -- send the browser of to the OP's authorization endpoint
 local function openidc_authorize(opts, session, target_url, prompt)
   local resty_random = require("resty.random")
@@ -624,6 +663,7 @@ local function openidc_authorize(opts, session, target_url, prompt)
     original_url = target_url,
     created_at = now
   }
+  openidc_prune_authorization_states(opts, authorization_states, state)
 
   -- store state in the session
   session:set("authorization_states", authorization_states)

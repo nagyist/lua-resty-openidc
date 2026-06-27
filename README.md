@@ -213,6 +213,16 @@ h2JHukolz9xf6qN61QMLSd83+kwoBr2drp6xg3eGDLIkQCQLrkY=
              -- Connect provider that ignores the paramter as the
              -- id_token will be rejected otherwise.
 
+             --authorization_state_expires_in = 300
+             -- Maximum age in seconds for pending authorization state stored
+             -- in the session. Expired authorization states are removed when
+             -- a new authorization request is created.
+
+             --authorization_state_max_number = 10
+             -- Maximum number of pending authorization states stored in the
+             -- session. When exceeded, the oldest authorization states are
+             -- removed when a new authorization request is created.
+
              --revoke_tokens_on_logout = false
              -- When revoke_tokens_on_logout is set to true a logout notifies the authorization server that previously obtained refresh and access tokens are no longer needed. This requires that revocation_endpoint is discoverable.
              -- If there is no revocation endpoint supplied or if there are errors on revocation the user will not be notified and the logout process continues normally.
