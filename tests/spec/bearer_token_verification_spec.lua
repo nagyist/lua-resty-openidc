@@ -744,3 +744,33 @@ describe("when a request_decorator has been specified when calling the jwks endp
     assert.error_log_contains('jwk uri_args:.*"foo"%s*:%s*"bar"')
   end)
 end)
+
+describe("when different bearer JWT validators share the verification cache", function()
+  test_support.start_server({
+    verify_opts = {
+      public_key = test_support.load("/spec/public_rsa_key.pem")
+    },
+    access_token = {
+      aud = "api-a"
+    }
+  })
+  teardown(test_support.stop_server)
+
+  local jwt = test_support.trim(http.request("http://127.0.0.1/jwt"))
+  local _, accepted_status = http.request({
+    url = "http://127.0.0.1/verify_bearer_token_audience_a",
+    headers = { authorization = "Bearer " .. jwt }
+  })
+  local _, rejected_status = http.request({
+    url = "http://127.0.0.1/verify_bearer_token_audience_b",
+    headers = { authorization = "Bearer " .. jwt }
+  })
+
+  it("the first validator accepts the token", function()
+    assert.are.equals(204, accepted_status)
+  end)
+
+  it("the second validator is not bypassed by the cached first result", function()
+    assert.are.equals(401, rejected_status)
+  end)
+end)
