@@ -4,8 +4,30 @@ require 'busted.runner'()
 
 local function assert_introspection_endpoint_call_contains(s, case_insensitive)
    assert.error_log_contains("Received introspection request: .*" ..  s .. ".*",
-                             case_insensitive)
+                              case_insensitive)
 end
+
+local function assert_introspection_endpoint_call_doesnt_contain(s, case_insensitive)
+   assert.is_not.error_log_contains("Received introspection request: .*" ..  s .. ".*",
+                              case_insensitive)
+end
+
+local function error_log_occurrences(s)
+  local count = 0
+  local pos = 1
+  local log = test_support.load("/tmp/server/logs/error.log")
+  while true do
+    pos = log:find(s, pos, true)
+    if not pos then
+      return count
+    end
+    count = count + 1
+    pos = pos + #s
+  end
+end
+
+local legacy_introspection_body_auth_warning = "introspection_endpoint_auth_method is not set; " ..
+  "sending introspection client credentials in the POST body is deprecated"
 
 describe("when the introspection endpoint is invoked", function()
   test_support.start_server()
@@ -39,9 +61,84 @@ describe("when the introspection endpoint is invoked", function()
     it("no cookies are sent with the introspection request", function()
       assert.error_log_contains("no cookie in introspection call")
     end)
+    it("the legacy body credentials behavior is deprecated", function()
+      assert.error_log_contains(legacy_introspection_body_auth_warning)
+    end)
     it("the response is valid", function()
       assert.are.equals(200, status)
     end)
+  end)
+end)
+
+describe("when legacy introspection body credentials are used without caching", function()
+  test_support.start_server({
+    introspection_opts = {
+      introspection_cache_ignore = true
+    }
+  })
+  teardown(test_support.stop_server)
+  local jwt = test_support.trim(http.request("http://127.0.0.1/jwt"))
+  local _, first_status = http.request({
+    url = "http://127.0.0.1/introspect",
+    headers = { authorization = "Bearer " .. jwt }
+  })
+  local _, second_status = http.request({
+    url = "http://127.0.0.1/introspect",
+    headers = { authorization = "Bearer " .. jwt }
+  })
+  it("logs the deprecation warning only once", function()
+    assert.are.equals(1, error_log_occurrences(legacy_introspection_body_auth_warning))
+  end)
+  it("the responses are valid", function()
+    assert.are.equals(200, first_status)
+    assert.are.equals(200, second_status)
+  end)
+end)
+
+describe("when legacy introspection body auth is used without client credentials", function()
+  test_support.start_server({
+    remove_introspection_config_keys = { "client_id", "client_secret" }
+  })
+  teardown(test_support.stop_server)
+  local jwt = test_support.trim(http.request("http://127.0.0.1/jwt"))
+  local _, status = http.request({
+    url = "http://127.0.0.1/introspect",
+    headers = { authorization = "Bearer " .. jwt }
+  })
+  it("doesn't log the deprecation warning", function()
+    assert.is_not.error_log_contains(legacy_introspection_body_auth_warning)
+  end)
+  it("the response is valid", function()
+    assert.are.equals(200, status)
+  end)
+end)
+
+describe("when the introspection endpoint is invoked using client_secret_basic", function()
+  test_support.start_server({
+    introspection_opts = {
+      introspection_endpoint_auth_method = "client_secret_basic"
+    }
+  })
+  teardown(test_support.stop_server)
+  local jwt = test_support.trim(http.request("http://127.0.0.1/jwt"))
+  local _, status = http.request({
+    url = "http://127.0.0.1/introspect",
+    headers = { authorization = "Bearer " .. jwt }
+  })
+  it("the request doesn't contain the client_id parameter", function()
+    assert_introspection_endpoint_call_doesnt_contain("client_id=client_id")
+  end)
+  it("the request doesn't contain the client_secret parameter", function()
+    assert_introspection_endpoint_call_doesnt_contain("client_secret=client_secret")
+  end)
+  it("the request contains the token parameter", function()
+    assert_introspection_endpoint_call_contains("token=" .. jwt:gsub("%-", "%%%-"))
+  end)
+  it("the request contains a basic auth header", function()
+    assert.error_log_contains("introspection authorization header: Basic")
+  end)
+  it("the response is valid", function()
+    assert.are.equals(200, status)
   end)
 end)
 

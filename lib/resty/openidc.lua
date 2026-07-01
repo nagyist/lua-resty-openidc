@@ -60,6 +60,8 @@ local DEBUG = ngx.DEBUG
 local ERROR = ngx.ERR
 local WARN = ngx.WARN
 
+local has_logged_legacy_introspection_body_auth_warning = false
+
 local function token_auth_method_precondition(method, required_field)
   return function(opts)
     if not opts[required_field] then
@@ -2332,11 +2334,20 @@ function openidc.introspect(opts)
 
   body[token_param_name] = access_token
 
-  if opts.client_id then
-    body.client_id = opts.client_id
-  end
-  if opts.client_secret then
-    body.client_secret = opts.client_secret
+  local use_legacy_introspection_body_auth = opts.introspection_endpoint_auth_method == nil
+  if use_legacy_introspection_body_auth then
+    if (opts.client_id or opts.client_secret) and not has_logged_legacy_introspection_body_auth_warning then
+      log(WARN, "introspection_endpoint_auth_method is not set; sending introspection client credentials " ..
+          "in the POST body is deprecated and will require explicit introspection_endpoint_auth_method = " ..
+          "\"client_secret_post\" in a future release")
+      has_logged_legacy_introspection_body_auth_warning = true
+    end
+    if opts.client_id then
+      body.client_id = opts.client_id
+    end
+    if opts.client_secret then
+      body.client_secret = opts.client_secret
+    end
   end
 
   -- merge any provided extra parameters
