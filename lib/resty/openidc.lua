@@ -562,6 +562,45 @@ local function openidc_pushed_authorization_request(opts, params)
   return json
 end
 
+local function openidc_prune_authorization_states(opts, authorization_states, current_state)
+  local max_age = opts.authorization_state_expires_in or 300
+  local max_number = opts.authorization_state_max_number or 10
+  local now = ngx.time()
+
+  if max_age < 0 then
+    max_age = 0
+  end
+  if max_number < 1 then
+    max_number = 1
+  end
+
+  for state, data in pairs(authorization_states) do
+    if not data.created_at or now - data.created_at > max_age then
+      authorization_states[state] = nil
+    end
+  end
+
+  local count = 0
+  for _ in pairs(authorization_states) do
+    count = count + 1
+  end
+
+  while count > max_number do
+    local oldest_state, oldest_at
+    for state, data in pairs(authorization_states) do
+      local created_at = data.created_at or 0
+      if state ~= current_state and (not oldest_at or created_at < oldest_at) then
+        oldest_state, oldest_at = state, created_at
+      end
+    end
+    if not oldest_state then
+      break
+    end
+    authorization_states[oldest_state] = nil
+    count = count - 1
+  end
+end
+
 -- send the browser of to the OP's authorization endpoint
 local function openidc_authorize(opts, session, target_url, prompt)
   local resty_random = require("resty.random")
@@ -618,12 +657,23 @@ local function openidc_authorize(opts, session, target_url, prompt)
     params.dpop_jkt = dpop_jkt
   end
 
+  local now = ngx.time()
+  local authorization_states = session:get("authorization_states") or {}
+  authorization_states[state] = {
+    nonce = nonce,
+    code_verifier = code_verifier,
+    original_url = target_url,
+    created_at = now
+  }
+  openidc_prune_authorization_states(opts, authorization_states, state)
+
   -- store state in the session
+  session:set("authorization_states", authorization_states)
   session:set("original_url", target_url)
   session:set("state", state)
   session:set("nonce", nonce)
   session:set("code_verifier", code_verifier)
-  session:set("last_authenticated", ngx.time())
+  session:set("last_authenticated", now)
 
   if opts.lifecycle and opts.lifecycle.on_created then
     err = opts.lifecycle.on_created(session, params)
@@ -715,6 +765,27 @@ local function openidc_dpop_nonce_from_response(res, accepted_statuses)
     end
   end
   return nil
+end
+
+-- Per-exchange DPoP nonces are kept in request-scoped storage (ngx.ctx) so
+-- that an opts table shared across requests/workers is never mutated with
+-- transient state. The durable, per-user token nonce still lives in the
+-- session; opts.dpop_nonce remains a static, caller-provided seed.
+local function openidc_get_dpop_nonce(opts, key)
+  local nonces = ngx.ctx.openidc_dpop_nonces
+  return (nonces and nonces[key]) or opts.dpop_nonce
+end
+
+local function openidc_set_dpop_nonce(key, nonce)
+  if not nonce then
+    return
+  end
+  local nonces = ngx.ctx.openidc_dpop_nonces
+  if not nonces then
+    nonces = {}
+    ngx.ctx.openidc_dpop_nonces = nonces
+  end
+  nonces[key] = nonce
 end
 
 local function openidc_validate_dpop_token_response(json)
@@ -842,7 +913,7 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
     if ep_name == "token" and opts.use_dpop then
       local proof
       proof, err = openidc_dpop_proof(opts, "POST", endpoint, nil,
-          dpop_nonce or opts.dpop_token_nonce or opts.dpop_nonce)
+          dpop_nonce or openidc_get_dpop_nonce(opts, "token"))
       if err then
         return nil, err, true
       end
@@ -878,7 +949,7 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
 
   local dpop_nonce = ep_name == "token" and opts.use_dpop and openidc_dpop_nonce_from_response(res, { 400, 401 })
   if dpop_nonce then
-    opts.dpop_token_nonce = dpop_nonce
+    openidc_set_dpop_nonce("token", dpop_nonce)
     log(DEBUG, "retrying " .. ep_name .. " endpoint call with DPoP nonce")
     res, err, proof_err = request_token_endpoint(dpop_nonce)
     if proof_err then
@@ -893,7 +964,7 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
 
   local next_dpop_nonce = ep_name == "token" and opts.use_dpop and openidc_dpop_nonce_from_response(res, { 200 })
   if next_dpop_nonce then
-    opts.dpop_token_nonce = next_dpop_nonce
+    openidc_set_dpop_nonce("token", next_dpop_nonce)
   end
   local response_dpop_nonce = next_dpop_nonce or dpop_nonce
 
@@ -1007,7 +1078,7 @@ function openidc.call_userinfo_endpoint(opts, access_token)
     end
 
     local proof, proof_err = openidc_dpop_proof(opts, "GET", opts.discovery.userinfo_endpoint, access_token,
-        dpop_nonce or opts.dpop_userinfo_nonce or opts.dpop_nonce)
+        dpop_nonce or openidc_get_dpop_nonce(opts, "userinfo"))
     if proof_err then
       return nil, proof_err
     end
@@ -1046,7 +1117,7 @@ function openidc.call_userinfo_endpoint(opts, access_token)
 
   local dpop_nonce = opts.use_dpop and openidc_dpop_nonce_from_response(res, { 401 })
   if dpop_nonce then
-    opts.dpop_userinfo_nonce = dpop_nonce
+    openidc_set_dpop_nonce("userinfo", dpop_nonce)
     log(DEBUG, "retrying userinfo endpoint call with DPoP nonce")
     headers, headers_err = userinfo_headers(dpop_nonce)
     if headers_err then
@@ -1477,11 +1548,11 @@ end
 -- Parameters :
 --     - opts the openidc module options
 --     - jwt_id_token the id_token from the id_token properties of the token endpoint response
---     - session the current session
+--     - nonce the nonce sent in the authorization request
 -- Return the id_token, nil if valid
 -- Return nil, the error if invalid
 --
-local function openidc_load_and_validate_jwt_id_token(opts, jwt_id_token, session)
+local function openidc_load_and_validate_jwt_id_token(opts, jwt_id_token, nonce)
 
   local jwt_obj, err = openidc_load_jwt_and_verify_crypto(opts, jwt_id_token, opts.public_key, opts.client_secret,
     opts.discovery.id_token_signing_alg_values_supported)
@@ -1507,13 +1578,32 @@ local function openidc_load_and_validate_jwt_id_token(opts, jwt_id_token, sessio
   log(DEBUG, "id_token payload: ", cjson.encode(jwt_obj.payload))
 
   -- validate the id_token contents
-  if openidc_validate_id_token(opts, id_token, session:get("nonce")) == false then
+  if openidc_validate_id_token(opts, id_token, nonce) == false then
     err = "id_token validation failed"
     log(ERROR, err)
     return nil, err
   end
 
   return id_token
+end
+
+local function openidc_authorization_state(session, state)
+  local authorization_states = session:get("authorization_states") or {}
+  local authorization_state = authorization_states[state]
+  if authorization_state then
+    return authorization_state, authorization_states
+  end
+
+  local legacy_state = session:get("state")
+  if state == legacy_state then
+    return {
+      nonce = session:get("nonce"),
+      code_verifier = session:get("code_verifier"),
+      original_url = session:get("original_url")
+    }, authorization_states
+  end
+
+  return nil, authorization_states, legacy_state
 end
 
 -- handle a "code" authorization response from the OP
@@ -1534,17 +1624,18 @@ local function openidc_authorization_response(opts, session)
   end
 
   -- check that the state returned in the response against the session; prevents CSRF
-  local state = session:get("state")
-  if args.state ~= state then
-    log_err = "state from argument: " .. (args.state and args.state or "nil") .. " does not match state restored from session: " .. (state and state or "nil")
+  local authorization_state, authorization_states, restored_state = openidc_authorization_state(session, args.state)
+  if not authorization_state then
+    log_err = "state from argument: " .. (args.state and args.state or "nil") .. " does not match state restored from session: " .. (restored_state and restored_state or "nil")
     client_err = "state from argument does not match state restored from session"
     log(ERROR, log_err)
     return nil, client_err, session:get("original_url"), session
   end
+  local original_url = authorization_state.original_url or session:get("original_url")
 
   err = ensure_config(opts)
   if err then
-    return nil, err, session:get("original_url"), session
+    return nil, err, original_url, session
   end
 
   -- check the iss if returned from the OP
@@ -1552,7 +1643,7 @@ local function openidc_authorization_response(opts, session)
     log_err = "iss from argument: " .. args.iss .. " does not match expected issuer: " .. opts.discovery.issuer
     client_err = "iss from argument does not match expected issuer"
     log(ERROR, log_err)
-    return nil, client_err, session:get("original_url"), session
+    return nil, client_err, original_url, session
   end
 
   -- check the client_id if returned from the OP
@@ -1560,7 +1651,7 @@ local function openidc_authorization_response(opts, session)
     log_err = "client_id from argument: " .. args.client_id .. " does not match expected client_id: " .. opts.client_id
     client_err = "client_id from argument does not match expected client_id"
     log(ERROR, log_err)
-    return nil, client_err, session:get("original_url"), session
+    return nil, client_err, original_url, session
   end
 
   -- assemble the parameters to the token endpoint
@@ -1568,8 +1659,8 @@ local function openidc_authorization_response(opts, session)
     grant_type = "authorization_code",
     code = args.code,
     redirect_uri = openidc_get_redirect_uri(opts, session),
-    state = state,
-    code_verifier = session:get("code_verifier")
+    state = args.state,
+    code_verifier = authorization_state.code_verifier
   }
 
   log(DEBUG, "Authentication with OP done -> Calling OP Token Endpoint to obtain tokens")
@@ -1579,19 +1670,27 @@ local function openidc_authorization_response(opts, session)
   local json
   json, err = openidc.call_token_endpoint(opts, opts.discovery.token_endpoint, body, opts.token_endpoint_auth_method)
   if err then
-    return nil, err, session:get("original_url"), session
+    return nil, err, original_url, session
   end
 
-  local id_token, err = openidc_load_and_validate_jwt_id_token(opts, json.id_token, session);
+  local id_token, err = openidc_load_and_validate_jwt_id_token(opts, json.id_token, authorization_state.nonce);
   if err then
-    return nil, err, session:get("original_url"), session
+    return nil, err, original_url, session
   end
 
   -- mark this sessions as authenticated
   session:set("authenticated", true)
-  session:set("nonce", nil)
-  session:set("state", nil)
-  session:set("code_verifier", nil)
+  authorization_states[args.state] = nil
+  if next(authorization_states) then
+    session:set("authorization_states", authorization_states)
+  else
+    session:set("authorization_states", nil)
+  end
+  if session:get("state") == args.state then
+    session:set("nonce", nil)
+    session:set("state", nil)
+    session:set("code_verifier", nil)
+  end
 
   if store_in_session(opts, 'id_token') then
     session:set("id_token", id_token)
@@ -1636,7 +1735,7 @@ local function openidc_authorization_response(opts, session)
     err = opts.lifecycle.on_authenticated(session, id_token, json)
     if err then
       log(WARN, "failed in `on_authenticated` handler: " .. err)
-      return nil, err, session:get("original_url"), session
+      return nil, err, original_url, session
     end
   end
 
@@ -1648,7 +1747,6 @@ local function openidc_authorization_response(opts, session)
   end
 
   -- redirect to the URL that was accessed originally
-  local original_url = session:get("original_url")
   log(DEBUG, "OIDC Authorization Code Flow completed -> Redirecting to original URL (" .. original_url .. ")")
   ngx.redirect(original_url)
   return nil, nil, original_url, session
@@ -1867,7 +1965,7 @@ local function openidc_access_token(opts, session, try_to_renew)
     scope = opts.scope and opts.scope or "openid email profile"
   }
   if opts.use_dpop then
-    opts.dpop_token_nonce = session:get("dpop_token_nonce") or opts.dpop_token_nonce
+    openidc_set_dpop_nonce("token", session:get("dpop_token_nonce"))
   end
 
   local json
@@ -1877,7 +1975,7 @@ local function openidc_access_token(opts, session, try_to_renew)
   end
   local id_token
   if json.id_token then
-    id_token, err = openidc_load_and_validate_jwt_id_token(opts, json.id_token, session)
+    id_token, err = openidc_load_and_validate_jwt_id_token(opts, json.id_token, session:get("nonce"))
     if err then
       log(ERROR, "invalid id token, discarding tokens returned while refreshing")
       return nil, err

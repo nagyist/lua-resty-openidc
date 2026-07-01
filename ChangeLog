@@ -1,4 +1,11 @@
 unreleased
+- scope DPoP nonces to the current request (via ngx.ctx) instead of
+  mutating the shared opts table, preventing one session's DPoP nonce
+  from leaking into another request; the per-user token nonce continues
+  to be persisted in the session.
+- added a security policy for privately reporting vulnerabilities.
+- added maintenance automation for dependency updates and pull request
+  contribution checks.
 - hardened the test Docker image by minimizing apt-installed packages
   and running the test suite as a non-root user.
 - added support for OAuth 2.0 Pushed Authorization Requests (PAR,
@@ -30,6 +37,12 @@ unreleased
   configure introspection_endpoint_auth_method = "client_secret_post"
   explicitly to keep sending credentials in the POST body in a future
   release; see #556
+- keep pending authorization states separate within the same browser
+  session so concurrent tabs do not overwrite state, nonce, PKCE verifier,
+  or original redirect URI values; see #553.
+- prune stale and excess pending authorization states from the session during
+  authorization requests, configurable with authorization_state_expires_in and
+  authorization_state_max_number; see #553.
 
 09/13/204
 - cross-tenant requests are fixed with lua-resty session 4.0.x; closes #526

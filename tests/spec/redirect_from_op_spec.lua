@@ -1,4 +1,5 @@
 local http = require("socket.http")
+local socket = require("socket")
 local test_support = require("test_support")
 local ltn12 = require("ltn12")
 require 'busted.runner'()
@@ -70,6 +71,175 @@ describe("when a redirect is received", function()
        assert.are.equals(302, redirStatus)
        assert.are.equals("/default/t", h.location)
     end)
+  end)
+end)
+
+describe("when multiple authorization requests share the same session", function()
+  test_support.start_server()
+  teardown(test_support.stop_server)
+
+  local _, _, first_headers = http.request({
+    url = "http://localhost/default/t",
+    redirect = false
+  })
+  local first_state = test_support.grab(first_headers, 'state')
+  local first_cookie_header = test_support.extract_cookies(first_headers)
+
+  local _, _, second_headers = http.request({
+    url = "http://localhost/default/other",
+    headers = { cookie = first_cookie_header },
+    redirect = false
+  })
+  local second_state = test_support.grab(second_headers, 'state')
+  local second_cookie_header = test_support.extract_cookies(second_headers)
+
+  test_support.register_nonce(first_headers)
+  local _, redirStatus, h = http.request({
+        url = "http://localhost/default/redirect_uri?code=foo&state=" .. first_state,
+        headers = { cookie = second_cookie_header },
+        redirect = false
+  })
+
+  it("generates a new state for each authorization request", function()
+    assert.are_not.equals(first_state, second_state)
+  end)
+
+  it("accepts the first authorization response", function()
+    assert.are.equals(302, redirStatus)
+  end)
+
+  it("redirects to the first authorization request's original URI", function()
+    assert.are.equals("/default/t", h.location)
+  end)
+end)
+
+describe("when pending authorization states exceed the configured limit", function()
+  test_support.start_server({
+    oidc_opts = {
+      authorization_state_max_number = 1
+    }
+  })
+  teardown(test_support.stop_server)
+
+  local _, _, first_headers = http.request({
+    url = "http://localhost/default/t",
+    redirect = false
+  })
+  local first_state = test_support.grab(first_headers, 'state')
+  local first_cookie_header = test_support.extract_cookies(first_headers)
+
+  local _, _, second_headers = http.request({
+    url = "http://localhost/default/other",
+    headers = { cookie = first_cookie_header },
+    redirect = false
+  })
+  local second_state = test_support.grab(second_headers, 'state')
+  local second_cookie_header = test_support.extract_cookies(second_headers)
+
+  local _, first_redir_status = http.request({
+    url = "http://localhost/default/redirect_uri?code=foo&state=" .. first_state,
+    headers = { cookie = second_cookie_header },
+    redirect = false
+  })
+
+  test_support.register_nonce(second_headers)
+  local _, second_redir_status, second_redir_headers = http.request({
+    url = "http://localhost/default/redirect_uri?code=foo&state=" .. second_state,
+    headers = { cookie = second_cookie_header },
+    redirect = false
+  })
+
+  it("rejects the oldest authorization response", function()
+    assert.are.equals(401, first_redir_status)
+  end)
+
+  it("keeps the newest authorization response usable", function()
+    assert.are.equals(302, second_redir_status)
+    assert.are.equals("/default/other", second_redir_headers.location)
+  end)
+end)
+
+describe("when pending authorization states exceed the configured limit in the same second", function()
+  test_support.start_server({
+    fixed_ngx_time = os.time(),
+    oidc_opts = {
+      authorization_state_max_number = 1
+    }
+  })
+  teardown(test_support.stop_server)
+
+  local _, _, first_headers = http.request({
+    url = "http://localhost/default/t",
+    redirect = false
+  })
+  local first_cookie_header = test_support.extract_cookies(first_headers)
+
+  local _, _, second_headers = http.request({
+    url = "http://localhost/default/other",
+    headers = { cookie = first_cookie_header },
+    redirect = false
+  })
+  local second_state = test_support.grab(second_headers, 'state')
+  local second_cookie_header = test_support.extract_cookies(second_headers)
+
+  test_support.register_nonce(second_headers)
+  local _, second_redir_status, second_redir_headers = http.request({
+    url = "http://localhost/default/redirect_uri?code=foo&state=" .. second_state,
+    headers = { cookie = second_cookie_header },
+    redirect = false
+  })
+
+  it("keeps the just-created authorization response usable", function()
+    assert.are.equals(302, second_redir_status)
+    assert.are.equals("/default/other", second_redir_headers.location)
+  end)
+end)
+
+describe("when a pending authorization state has expired", function()
+  test_support.start_server({
+    oidc_opts = {
+      authorization_state_expires_in = 0
+    }
+  })
+  teardown(test_support.stop_server)
+
+  local _, _, first_headers = http.request({
+    url = "http://localhost/default/t",
+    redirect = false
+  })
+  local first_state = test_support.grab(first_headers, 'state')
+  local first_cookie_header = test_support.extract_cookies(first_headers)
+
+  socket.sleep(1.1)
+
+  local _, _, second_headers = http.request({
+    url = "http://localhost/default/other",
+    headers = { cookie = first_cookie_header },
+    redirect = false
+  })
+  local second_state = test_support.grab(second_headers, 'state')
+  local second_cookie_header = test_support.extract_cookies(second_headers)
+
+  local _, first_redir_status = http.request({
+    url = "http://localhost/default/redirect_uri?code=foo&state=" .. first_state,
+    headers = { cookie = second_cookie_header },
+    redirect = false
+  })
+
+  test_support.register_nonce(second_headers)
+  local _, second_redir_status, second_redir_headers = http.request({
+    url = "http://localhost/default/redirect_uri?code=foo&state=" .. second_state,
+    headers = { cookie = second_cookie_header },
+    redirect = false
+  })
+
+  it("rejects the expired authorization response", function()
+    assert.are.equals(401, first_redir_status)
+  end)
+
+  it("keeps the fresh authorization response usable", function()
+    assert.are.equals(302, second_redir_status)
+    assert.are.equals("/default/other", second_redir_headers.location)
   end)
 end)
 
