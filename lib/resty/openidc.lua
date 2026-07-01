@@ -2428,7 +2428,11 @@ end
 function openidc.jwt_verify(access_token, opts, ...)
   local err
   local json
-  local v = get_cached_jwt_verification(opts, access_token)
+  local has_claim_specs = select("#", ...) > 0
+  local v
+  if not has_claim_specs then
+    v = get_cached_jwt_verification(opts, access_token)
+  end
 
   local slack = opts.iat_slack and opts.iat_slack or 120
   if not v then
@@ -2440,8 +2444,10 @@ function openidc.jwt_verify(access_token, opts, ...)
       local encoded_json = cjson.encode(json)
       log(DEBUG, "jwt: ", encoded_json)
 
-      set_cached_jwt_verification(opts, access_token, encoded_json,
-                                  json.exp and json.exp - ngx.time() or 120)
+      if not has_claim_specs then
+        set_cached_jwt_verification(opts, access_token, encoded_json,
+                                    json.exp and json.exp - ngx.time() or 120)
+      end
     end
 
   else

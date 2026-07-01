@@ -162,6 +162,7 @@ http {
     access_log /tmp/server/logs/access.log;
     lua_package_path '~/lua/?.lua;/tmp/server/conf/?.lua;;';
     lua_shared_dict discovery 1m;
+    lua_shared_dict jwt_verification 1m;
     init_by_lua_block {
         test_globals = require("test_globals")
     }
@@ -383,6 +384,40 @@ http {
                 else
                   ngx.status = 204
                   ngx.log(ngx.ERR, "Valid token: " .. test_globals.cjson.encode(json))
+                end
+            }
+        }
+
+        location /verify_bearer_token_audience_a {
+            content_by_lua_block {
+                local opts = VERIFY_OPTS
+                local validators = require("resty.jwt-validators")
+                local json, err, token = test_globals.oidc.bearer_jwt_verify(opts, {
+                  aud = validators.equals("api-a")
+                })
+                if err then
+                  ngx.status = 401
+                  ngx.log(ngx.ERR, "Invalid token for api-a: " .. err)
+                else
+                  ngx.status = 204
+                  ngx.log(ngx.ERR, "Valid token for api-a: " .. test_globals.cjson.encode(json))
+                end
+            }
+        }
+
+        location /verify_bearer_token_audience_b {
+            content_by_lua_block {
+                local opts = VERIFY_OPTS
+                local validators = require("resty.jwt-validators")
+                local json, err, token = test_globals.oidc.bearer_jwt_verify(opts, {
+                  aud = validators.equals("api-b")
+                })
+                if err then
+                  ngx.status = 401
+                  ngx.log(ngx.ERR, "Invalid token for api-b: " .. err)
+                else
+                  ngx.status = 204
+                  ngx.log(ngx.ERR, "Valid token for api-b: " .. test_globals.cjson.encode(json))
                 end
             }
         }
