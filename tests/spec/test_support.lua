@@ -105,6 +105,12 @@ if os.getenv('coverage') then
 end
 test_globals.oidc = require "resty.openidc"
 test_globals.cjson = require "cjson"
+if FIXED_NGX_TIME ~= nil then
+  local fixed_ngx_time = FIXED_NGX_TIME
+  ngx.time = function()
+    return fixed_ngx_time
+  end
+end
 test_globals.delay = function(delay_response)
   if delay_response > 0 then
     ngx.sleep(delay_response / 1000)
@@ -610,6 +616,7 @@ local function write_template(out, template, custom_config)
     :gsub("REFRESH_ID_TOKEN", serpent.block(refresh_id_token, {comment = false }))
     :gsub("ID_TOKEN", serpent.block(id_token, {comment = false }))
     :gsub("ACCESS_TOKEN", serpent.block(access_token, {comment = false }))
+    :gsub("FIXED_NGX_TIME", custom_config["fixed_ngx_time"] or "nil")
     :gsub("UNAUTH_ACTION", custom_config["unauth_action"] and ('"' .. custom_config["unauth_action"] .. '"') or DEFAULT_UNAUTH_ACTION)
     :gsub("SHARE_OIDC_OPTS", custom_config["share_oidc_opts"] and "true" or DEFAULT_SHARE_OIDC_OPTS)
   out:write(content)
