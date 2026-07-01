@@ -1,4 +1,4 @@
-unreleased
+07/01/2026
 - do not use the shared JWT verification cache for bearer JWT validation
   calls that pass additional claim validators, preventing a token accepted
   by one validator set from bypassing a stricter validator set on cache hit.
@@ -46,6 +46,7 @@ unreleased
 - prune stale and excess pending authorization states from the session during
   authorization requests, configurable with authorization_state_expires_in and
   authorization_state_max_number; see #553.
+- release 1.9.0
 
 09/13/204
 - cross-tenant requests are fixed with lua-resty session 4.0.x; closes #526
